@@ -3,8 +3,10 @@
 
 import datetime
 import os
+import sys
 import time
 from loguru import logger
+from tqdm.auto import tqdm
 
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -60,6 +62,7 @@ class Trainer:
 
         # metric record
         self.meter = MeterBuffer(window_size=exp.print_interval)
+        self._pbar = None
         self.file_name = os.path.join(exp.output_dir, args.experiment_name)
 
         if self.rank == 0:
@@ -89,10 +92,27 @@ class Trainer:
             self.after_epoch()
 
     def train_in_iter(self):
-        for self.iter in range(self.max_iter):
-            self.before_iter()
-            self.train_one_iter()
-            self.after_iter()
+        pbar = None
+        if self.rank == 0:
+            pbar = tqdm(
+                total=self.max_iter,
+                desc=f"epoch {self.epoch + 1}/{self.max_epoch}",
+                leave=True,
+                dynamic_ncols=True,
+                file=getattr(sys, "__stderr__", None) or sys.stderr,
+            )
+        self._pbar = pbar
+        try:
+            for self.iter in range(self.max_iter):
+                self.before_iter()
+                self.train_one_iter()
+                self.after_iter()
+                if pbar is not None:
+                    pbar.update(1)
+        finally:
+            if pbar is not None:
+                pbar.close()
+            self._pbar = None
 
     def train_one_iter(self):
         iter_start_time = time.time()
@@ -216,8 +236,6 @@ class Trainer:
                                                 metadata=metadata)
 
     def before_epoch(self):
-        logger.info("---> start train epoch{}".format(self.epoch + 1))
-
         if self.epoch + 1 == self.max_epoch - self.exp.no_aug_epochs or self.no_aug:
             logger.info("--->No mosaic aug now!")
             self.train_loader.close_mosaic()
@@ -240,60 +258,67 @@ class Trainer:
     def before_iter(self):
         pass
 
+    def _epoch_log_line(self):
+        left_iters = self.max_iter * self.max_epoch - (self.progress_in_iter + 1)
+        eta_seconds = self.meter["iter_time"].global_avg * left_iters
+        eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
+        loss_meter = self.meter.get_filtered_meter("loss")
+        loss_str = ", ".join(
+            ["{}: {:.1f}".format(k, v.latest) for k, v in loss_meter.items() if v.latest is not None]
+        )
+        time_meter = self.meter.get_filtered_meter("time")
+        time_str = ", ".join(
+            ["{}: {:.3f}s".format(k, v.avg) for k, v in time_meter.items()]
+        )
+        mem_str = "gpu mem: {:.0f}Mb, mem: {:.1f}Gb".format(gpu_mem_usage(), mem_usage())
+        lr = self.meter["lr"].latest
+        lr_str = "{:.3e}".format(lr) if lr is not None else "-"
+        return (
+            "epoch: {}/{}, {}, {}, {}, lr: {}".format(
+                self.epoch + 1, self.max_epoch, mem_str, time_str, loss_str, lr_str
+            )
+            + (", size: {:d}, {}".format(self.input_size[0], eta_str))
+        )
+
     def after_iter(self):
         """
         `after_iter` contains two parts of logic:
             * log information
             * reset setting of resize
         """
-        # log needed information
+        loss_meter = self.meter.get_filtered_meter("loss")
+        if self._pbar is not None:
+            postfix = {}
+            for k, v in loss_meter.items():
+                if v.latest is None:
+                    continue
+                short = k.replace("_loss", "").replace("total", "loss")
+                postfix[short] = f"{float(v.latest):.1f}"
+            if self.meter["lr"].latest is not None:
+                postfix["lr"] = f"{self.meter['lr'].latest:.1e}"
+            self._pbar.set_postfix(postfix, refresh=False)
+
+        if (self.iter + 1) == self.max_iter:
+            logger.info(self._epoch_log_line())
+
         if (self.iter + 1) % self.exp.print_interval == 0:
-            # TODO check ETA logic
-            left_iters = self.max_iter * self.max_epoch - (self.progress_in_iter + 1)
-            eta_seconds = self.meter["iter_time"].global_avg * left_iters
-            eta_str = "ETA: {}".format(datetime.timedelta(seconds=int(eta_seconds)))
-
-            progress_str = "epoch: {}/{}, iter: {}/{}".format(
-                self.epoch + 1, self.max_epoch, self.iter + 1, self.max_iter
-            )
-            loss_meter = self.meter.get_filtered_meter("loss")
-            loss_str = ", ".join(
-                ["{}: {:.1f}".format(k, v.latest) for k, v in loss_meter.items()]
-            )
-
-            time_meter = self.meter.get_filtered_meter("time")
-            time_str = ", ".join(
-                ["{}: {:.3f}s".format(k, v.avg) for k, v in time_meter.items()]
-            )
-
-            mem_str = "gpu mem: {:.0f}Mb, mem: {:.1f}Gb".format(gpu_mem_usage(), mem_usage())
-
-            logger.info(
-                "{}, {}, {}, {}, lr: {:.3e}".format(
-                    progress_str,
-                    mem_str,
-                    time_str,
-                    loss_str,
-                    self.meter["lr"].latest,
-                )
-                + (", size: {:d}, {}".format(self.input_size[0], eta_str))
-            )
-
             if self.rank == 0:
                 if self.args.logger == "tensorboard":
                     self.tblogger.add_scalar(
                         "train/lr", self.meter["lr"].latest, self.progress_in_iter)
                     for k, v in loss_meter.items():
+                        if v.latest is None:
+                            continue
                         self.tblogger.add_scalar(
                             f"train/{k}", v.latest, self.progress_in_iter)
                 if self.args.logger == "wandb":
-                    metrics = {"train/" + k: v.latest for k, v in loss_meter.items()}
+                    metrics = {"train/" + k: v.latest for k, v in loss_meter.items() if v.latest is not None}
                     metrics.update({
                         "train/lr": self.meter["lr"].latest
                     })
                     self.wandb_logger.log_metrics(metrics, step=self.progress_in_iter)
                 if self.args.logger == 'mlflow':
-                    logs = {"train/" + k: v.latest for k, v in loss_meter.items()}
+                    logs = {"train/" + k: v.latest for k, v in loss_meter.items() if v.latest is not None}
                     logs.update({"train/lr": self.meter["lr"].latest})
                     self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
 
