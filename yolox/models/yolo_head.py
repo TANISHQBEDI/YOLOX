@@ -16,7 +16,7 @@ from yolox.utils import (
     decode_angle,
     kfiou_loss,
     meshgrid,
-    rbox_to_aabb_xyxy,
+    rbox_iou,
     visualize_assign,
 )
 
@@ -534,11 +534,9 @@ class YOLOXHead(nn.Module):
             gt_rbox = torch.cat(
                 (gt_bboxes_per_image, gt_angles.unsqueeze(-1)), dim=1
             )
-            pair_wise_ious = bboxes_iou(
-                rbox_to_aabb_xyxy(gt_rbox),
-                rbox_to_aabb_xyxy(pred_rbox),
-                True,
-            )
+            # Rotated IoU, not the AABB hull. A level box on a tilted GT
+            # must score as a poor match (YOLOv8-OBB-style assigner signal).
+            pair_wise_ious = rbox_iou(gt_rbox, pred_rbox)
         else:
             pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds_per_image, False)
 

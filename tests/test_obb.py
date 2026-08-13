@@ -450,5 +450,29 @@ class TestRotatedEval(unittest.TestCase):
         self.assertGreater(aabb_iou, r_iou)
 
 
+class TestRotatedAssign(unittest.TestCase):
+    def test_rbox_iou_identity_is_one(self):
+        from yolox.utils.obb import rbox_iou
+
+        box = torch.tensor([[50.0, 40.0, 30.0, 10.0, 0.4]])
+        iou = rbox_iou(box, box)
+        self.assertAlmostEqual(float(iou[0, 0]), 1.0, places=3)
+
+    def test_matching_iou_penalizes_wrong_angle(self):
+        from yolox.utils.obb import rbox_iou
+
+        gt = torch.tensor([[50.0, 50.0, 40.0, 8.0, math.radians(30.0)]])
+        pred_ok = torch.tensor([[50.0, 50.0, 40.0, 8.0, math.radians(30.0)]])
+        pred_flat = torch.tensor([[50.0, 50.0, 40.0, 8.0, 0.0]])
+        hull_flat = float(
+            bboxes_iou(rbox_to_aabb_xyxy(gt), rbox_to_aabb_xyxy(pred_flat), xyxy=True)[0, 0]
+        )
+        rot_ok = float(rbox_iou(gt, pred_ok)[0, 0])
+        rot_flat = float(rbox_iou(gt, pred_flat)[0, 0])
+        self.assertGreater(rot_ok, 0.9)
+        self.assertGreater(hull_flat, rot_flat)
+        self.assertGreater(rot_ok, rot_flat)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ __all__ = [
     "transform_obb_xyxy",
     "kfiou_loss",
     "kfiou_matrix",
+    "rbox_iou",
     "rbox_to_aabb_xyxy",
 ]
 
@@ -362,3 +363,69 @@ def rbox_to_aabb_xyxy(xywhr):
     hw = (c * w + s * h) * 0.5
     hh = (s * w + c * h) * 0.5
     return torch.stack((cx - hw, cy - hh, cx + hw, cy + hh), dim=-1)
+
+
+def rbox_iou(boxes_a, boxes_b):
+    """
+    Pairwise rotated IoU for matching.
+
+    boxes_*: (N, 5) / (M, 5) as cx, cy, w, h, theta_radians.
+    Prefers torchvision.ops.box_iou_rotated (same degrees convention as
+    nms_rotated). Falls back to OpenCV rotatedRectangleIntersection so a
+    wrong tilt is a low match even when that op is missing.
+    """
+    n, m = boxes_a.shape[0], boxes_b.shape[0]
+    if n == 0 or m == 0:
+        return boxes_a.new_zeros((n, m))
+
+    try:
+        import torchvision
+
+        iou_fn = getattr(torchvision.ops, "box_iou_rotated", None)
+    except Exception:
+        iou_fn = None
+
+    if iou_fn is not None:
+        def _deg(boxes):
+            return torch.stack(
+                (
+                    boxes[:, 0],
+                    boxes[:, 1],
+                    boxes[:, 2].clamp(min=1e-3),
+                    boxes[:, 3].clamp(min=1e-3),
+                    boxes[:, 4] * (180.0 / math.pi),
+                ),
+                dim=1,
+            )
+
+        iou = iou_fn(_deg(boxes_a), _deg(boxes_b))
+        return torch.nan_to_num(iou, nan=0.0).clamp(0.0, 1.0)
+
+    a = boxes_a.detach().to(dtype=torch.float32, device="cpu").numpy()
+    b = boxes_b.detach().to(dtype=torch.float32, device="cpu").numpy()
+    ious = _pairwise_rbox_iou_cv2(a, b)
+    return torch.as_tensor(ious, device=boxes_a.device, dtype=boxes_a.dtype)
+
+
+def _pairwise_rbox_iou_cv2(boxes_a, boxes_b):
+    """numpy (N,5) (M,5) cx,cy,w,h,theta_rad -> (N,M) IoU."""
+    ious = np.zeros((boxes_a.shape[0], boxes_b.shape[0]), dtype=np.float64)
+    a_deg = np.concatenate(
+        (boxes_a[:, :4], boxes_a[:, 4:5] * (180.0 / math.pi)), axis=1
+    )
+    b_deg = np.concatenate(
+        (boxes_b[:, :4], boxes_b[:, 4:5] * (180.0 / math.pi)), axis=1
+    )
+    for i, ra in enumerate(a_deg):
+        r1 = ((float(ra[0]), float(ra[1])), (float(ra[2]), float(ra[3])), float(ra[4]))
+        area_a = float(ra[2]) * float(ra[3])
+        for j, rb in enumerate(b_deg):
+            r2 = ((float(rb[0]), float(rb[1])), (float(rb[2]), float(rb[3])), float(rb[4]))
+            ret, pts = cv2.rotatedRectangleIntersection(r1, r2)
+            if ret == 0 or pts is None:
+                continue
+            inter = float(cv2.contourArea(pts))
+            union = area_a + float(rb[2]) * float(rb[3]) - inter
+            if union > 0:
+                ious[i, j] = inter / union
+    return ious
