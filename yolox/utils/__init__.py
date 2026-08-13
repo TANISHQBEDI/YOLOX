@@ -3,7 +3,7 @@
 
 from .allreduce_norm import *
 from .boxes import *
-from .checkpoint import load_ckpt, save_checkpoint
+from .checkpoint import load_ckpt, save_checkpoint, torch_load
 from .obb import *
 from .compat import meshgrid
 from .demo_utils import *

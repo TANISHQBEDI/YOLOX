@@ -20,7 +20,8 @@ from yolox.utils import (
     fuse_model,
     get_local_rank,
     get_model_info,
-    setup_logger
+    setup_logger,
+    torch_load,
 )
 
 
@@ -164,7 +165,7 @@ def main(exp, args, num_gpu):
             ckpt_file = args.ckpt
         logger.info("loading checkpoint from {}".format(ckpt_file))
         loc = "cuda:{}".format(rank)
-        ckpt = torch.load(ckpt_file, map_location=loc)
+        ckpt = torch_load(ckpt_file, map_location=loc)
         model.load_state_dict(ckpt["model"])
         logger.info("loaded checkpoint done.")
 

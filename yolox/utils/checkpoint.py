@@ -8,6 +8,16 @@ from loguru import logger
 import torch
 
 
+def torch_load(f, map_location="cpu", **kwargs):
+    """Load a YOLOX checkpoint. PyTorch 2.6+ defaults weights_only=True."""
+    kwargs.setdefault("weights_only", False)
+    try:
+        return torch.load(f, map_location=map_location, **kwargs)
+    except TypeError:
+        kwargs.pop("weights_only", None)
+        return torch.load(f, map_location=map_location, **kwargs)
+
+
 def load_ckpt(model, ckpt):
     model_state_dict = model.state_dict()
     load_dict = {}

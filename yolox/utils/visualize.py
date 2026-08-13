@@ -28,13 +28,24 @@ def vis(img, boxes, scores, cls_ids, conf=0.5, class_names=None, angles=None):
 
         txt_size = cv2.getTextSize(text, font, 0.4, 1)[0]
         if angles is not None:
-            cx = (box[0] + box[2]) * 0.5
-            cy = (box[1] + box[3]) * 0.5
-            bw = box[2] - box[0]
-            bh = box[3] - box[1]
-            theta_deg = float(np.degrees(angles[i]))
-            rect = ((cx, cy), (bw, bh), theta_deg)
-            pts = cv2.boxPoints(rect).astype(np.int32)
+            # Draw the oriented box. Avoid cv2.boxPoints: OpenCV 4.8+ rejects
+            # numpy/tensor scalars for RotatedRect fields.
+            cx = float((box[0] + box[2]) * 0.5)
+            cy = float((box[1] + box[3]) * 0.5)
+            bw = float(box[2] - box[0])
+            bh = float(box[3] - box[1])
+            theta = float(angles[i])
+            c, s = np.cos(theta), np.sin(theta)
+            dx, dy = bw * 0.5, bh * 0.5
+            pts = np.array(
+                [
+                    [cx + c * dx - s * dy, cy + s * dx + c * dy],
+                    [cx - c * dx - s * dy, cy - s * dx + c * dy],
+                    [cx - c * dx + s * dy, cy - s * dx - c * dy],
+                    [cx + c * dx + s * dy, cy + s * dx - c * dy],
+                ],
+                dtype=np.int32,
+            )
             cv2.polylines(img, [pts], True, color, 2)
         else:
             cv2.rectangle(img, (x0, y0), (x1, y1), color, 2)

@@ -12,6 +12,7 @@ import torch
 from torch2trt import torch2trt
 
 from yolox.exp import get_exp
+from yolox.utils import torch_load
 
 
 def make_parser():
@@ -50,7 +51,7 @@ def main():
     else:
         ckpt_file = args.ckpt
 
-    ckpt = torch.load(ckpt_file, map_location="cpu")
+    ckpt = torch_load(ckpt_file, map_location="cpu")
     # load the model state dict
 
     model.load_state_dict(ckpt["model"])

@@ -11,7 +11,7 @@ from torch import nn
 
 from yolox.exp import get_exp
 from yolox.models.network_blocks import SiLU
-from yolox.utils import replace_module
+from yolox.utils import replace_module, torch_load
 
 
 def make_parser():
@@ -76,7 +76,7 @@ def main():
         ckpt_file = args.ckpt
 
     # load the model state dict
-    ckpt = torch.load(ckpt_file, map_location="cpu")
+    ckpt = torch_load(ckpt_file, map_location="cpu")
 
     model.eval()
     if "model" in ckpt:

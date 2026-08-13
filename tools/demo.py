@@ -14,7 +14,7 @@ import torch
 from yolox.data.data_augment import ValTransform
 from yolox.data.datasets import COCO_CLASSES
 from yolox.exp import get_exp
-from yolox.utils import fuse_model, get_model_info, postprocess, vis
+from yolox.utils import fuse_model, get_model_info, postprocess, torch_load, vis
 
 IMAGE_EXT = [".jpg", ".jpeg", ".webp", ".bmp", ".png"]
 
@@ -176,10 +176,11 @@ class Predictor(object):
 
         # preprocessing: resize
         bboxes /= ratio
+        bboxes = bboxes.numpy()
 
-        cls = output[:, 6]
-        scores = output[:, 4] * output[:, 5]
-        angles = output[:, 7] if output.size(1) > 7 else None
+        cls = output[:, 6].numpy()
+        scores = (output[:, 4] * output[:, 5]).numpy()
+        angles = output[:, 7].numpy() if output.size(1) > 7 else None
 
         vis_res = vis(img, bboxes, scores, cls, cls_conf, self.cls_names, angles)
         return vis_res
@@ -281,7 +282,7 @@ def main(exp, args):
         else:
             ckpt_file = args.ckpt
         logger.info("loading checkpoint")
-        ckpt = torch.load(ckpt_file, map_location="cpu")
+        ckpt = torch_load(ckpt_file, map_location="cpu")
         # load the model state dict
         model.load_state_dict(ckpt["model"])
         logger.info("loaded checkpoint done.")
