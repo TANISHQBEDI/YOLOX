@@ -49,7 +49,9 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
         # Get score and class with highest confidence
         class_conf, class_pred = torch.max(image_pred[:, 5: 5 + num_classes], 1, keepdim=True)
 
-        conf_mask = (image_pred[:, 4] * class_conf.squeeze() >= conf_thre).squeeze()
+        # squeeze(-1) keeps shape (N,) even when N==1; a full squeeze() would
+        # become a 0-d mask and break detections[conf_mask].
+        conf_mask = image_pred[:, 4] * class_conf.squeeze(-1) >= conf_thre
         # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred[, theta])
         detections = torch.cat((image_pred[:, :5], class_conf, class_pred.float()), 1)
         angle_idx = 5 + num_classes

@@ -145,6 +145,9 @@ class YOLOXHead(nn.Module):
         self.l1_loss = nn.L1Loss(reduction="none")
         self.bcewithlog_loss = nn.BCEWithLogitsLoss(reduction="none")
         self.iou_loss = IOUloss(reduction="none")
+        # Detection pretrain: 5.0 / 0.5. Angle finetune: 1.0 / 5.0
+        self.reg_weight = 5.0
+        self.angle_weight = 0.5
         self.strides = strides
         self.grids = [torch.zeros(1)] * len(in_channels)
 
@@ -443,10 +446,17 @@ class YOLOXHead(nn.Module):
             angle_loss(pred_angle[:, 0], pred_angle[:, 1], angle_targets)
         ).sum() / num_fg
 
-        reg_weight = 5.0
-        # KFIoU already jointly scores (w,h,θ); keep a light angle term so the
-        # sin/cos head does not stall.
-        loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1 + 0.5 * loss_angle
+        reg_weight = float(getattr(self, "reg_weight", 5.0))
+        angle_weight = float(getattr(self, "angle_weight", 0.5))
+        # KFIoU jointly scores (w,h,θ); angle_weight must be large enough that
+        # sin/cos does not collapse to 0 when most GT pallets are upright.
+        loss = (
+            reg_weight * loss_iou
+            + loss_obj
+            + loss_cls
+            + loss_l1
+            + angle_weight * loss_angle
+        )
 
         return (
             loss,

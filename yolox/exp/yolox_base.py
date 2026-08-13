@@ -93,6 +93,10 @@ class Exp(BaseExp):
         # eval period in epoch, for example,
         # if set to 1, model will be evaluate after every epoch.
         self.eval_interval = 10
+        # Box vs angle loss scales. Default matches YOLOX (5x IoU). For an
+        # angle finetune from a strong detector, use reg_weight=1, angle_weight=5.
+        self.reg_weight = 5.0
+        self.angle_weight = 0.5
         # save history checkpoint or not.
         # If set to False, yolox will only save latest and best ckpt.
         self.save_history_ckpt = True
@@ -125,6 +129,8 @@ class Exp(BaseExp):
 
         self.model.apply(init_yolo)
         self.model.head.initialize_biases(1e-2)
+        self.model.head.reg_weight = float(getattr(self, "reg_weight", 5.0))
+        self.model.head.angle_weight = float(getattr(self, "angle_weight", 0.5))
         self.model.train()
         return self.model
 

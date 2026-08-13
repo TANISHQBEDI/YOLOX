@@ -27,6 +27,10 @@ class Exp(MyExp):
         self.max_epoch = 100
         self.data_num_workers = 4
         self.eval_interval = 5
+        # Detection pretrain (this 100-epoch run): 5.0 / 0.5
+        # Angle finetune from best_ckpt: set 1.0 / 5.0
+        self.reg_weight = 5.0
+        self.angle_weight = 0.5
 
     def get_dataset(self, cache: bool = False, cache_type: str = "ram"):
         from yolox.data import TrainTransform, YoloV8OBBDataset
