@@ -18,6 +18,7 @@ class Exp(MyExp):
         self.train_split = "train"
         self.val_split = "valid"
         self.num_classes = 1
+        self.class_names = ("Pallet-Detection",)
 
         # Roboflow export is 416x416
         self.input_size = (416, 416)
