@@ -6,6 +6,8 @@ import numpy as np
 import torch
 import torchvision
 
+from .obb import decode_angle
+
 __all__ = [
     "filter_box",
     "postprocess",
@@ -47,8 +49,14 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
         class_conf, class_pred = torch.max(image_pred[:, 5: 5 + num_classes], 1, keepdim=True)
 
         conf_mask = (image_pred[:, 4] * class_conf.squeeze() >= conf_thre).squeeze()
-        # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred)
+        # Detections ordered as (x1, y1, x2, y2, obj_conf, class_conf, class_pred[, theta])
         detections = torch.cat((image_pred[:, :5], class_conf, class_pred.float()), 1)
+        angle_idx = 5 + num_classes
+        if image_pred.size(1) >= angle_idx + 2:
+            theta = decode_angle(
+                image_pred[:, angle_idx], image_pred[:, angle_idx + 1]
+            ).unsqueeze(1)
+            detections = torch.cat((detections, theta), 1)
         detections = detections[conf_mask]
         if not detections.size(0):
             continue

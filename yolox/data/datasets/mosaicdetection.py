@@ -7,7 +7,7 @@ import random
 import cv2
 import numpy as np
 
-from yolox.utils import adjust_box_anns, get_local_rank
+from yolox.utils import adjust_box_anns, ensure_theta_column, get_local_rank, wrap_angle
 
 from ..data_augment import random_affine
 from .datasets_wrapper import Dataset
@@ -109,7 +109,7 @@ class MosaicDetection(Dataset):
                 mosaic_img[l_y1:l_y2, l_x1:l_x2] = img[s_y1:s_y2, s_x1:s_x2]
                 padw, padh = l_x1 - s_x1, l_y1 - s_y1
 
-                labels = _labels.copy()
+                labels = ensure_theta_column(_labels.copy())
                 # Normalized xywh to pixel xyxy format
                 if _labels.size > 0:
                     labels[:, 0] = scale * _labels[:, 0] + padw
@@ -224,9 +224,14 @@ class MosaicDetection(Dataset):
             cp_bboxes_transformed_np[:, 1::2] - y_offset, 0, target_h
         )
 
+        cp_labels = ensure_theta_column(cp_labels)
         cls_labels = cp_labels[:, 4:5].copy()
+        thetas = cp_labels[:, 5:6].copy()
+        if FLIP:
+            thetas = wrap_angle(-thetas)
         box_labels = cp_bboxes_transformed_np
-        labels = np.hstack((box_labels, cls_labels))
+        labels = np.hstack((box_labels, cls_labels, thetas))
+        origin_labels = ensure_theta_column(origin_labels)
         origin_labels = np.vstack((origin_labels, labels))
         origin_img = origin_img.astype(np.float32)
         origin_img = 0.5 * origin_img + 0.5 * padded_cropped_img.astype(np.float32)

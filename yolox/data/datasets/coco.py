@@ -107,11 +107,15 @@ class COCODataset(CacheDataset):
 
         num_objs = len(objs)
 
-        res = np.zeros((num_objs, 5))
+        res = np.zeros((num_objs, 6))
         for ix, obj in enumerate(objs):
             cls = self.class_ids.index(obj["category_id"])
             res[ix, 0:4] = obj["clean_bbox"]
             res[ix, 4] = cls
+            if "theta" in obj:
+                res[ix, 5] = obj["theta"]
+            elif "rotation" in obj:
+                res[ix, 5] = obj["rotation"]
 
         r = min(self.img_size[0] / height, self.img_size[1] / width)
         res[:, :4] *= r
@@ -172,11 +176,12 @@ class COCODataset(CacheDataset):
         Returns:
             img (numpy.ndarray): pre-processed image
             padded_labels (torch.Tensor): pre-processed label data.
-                The shape is :math:`[max_labels, 5]`.
-                each label consists of [class, xc, yc, w, h]:
+                The shape is :math:`[max_labels, 6]`.
+                each label consists of [class, xc, yc, w, h, theta]:
                     class (float): class index.
                     xc, yc (float) : center of bbox whose values range from 0 to 1.
                     w, h (float) : size of bbox whose values range from 0 to 1.
+                    theta (float): box orientation in radians.
             info_img : tuple of h, w.
                 h, w (int): original shape of the image
             img_id (int): same as the input index. Used for evaluation.

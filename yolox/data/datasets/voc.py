@@ -48,7 +48,7 @@ class AnnotationTransform(object):
         Returns:
             a list containing lists of bounding boxes  [bbox coords, class name]
         """
-        res = np.empty((0, 5))
+        res = np.empty((0, 6))
         for obj in target.iter("object"):
             difficult = obj.find("difficult")
             if difficult is not None:
@@ -69,8 +69,8 @@ class AnnotationTransform(object):
                 bndbox.append(cur_pt)
             label_idx = self.class_to_ind[name]
             bndbox.append(label_idx)
-            res = np.vstack((res, bndbox))  # [xmin, ymin, xmax, ymax, label_ind]
-            # img_id = target.find('filename').text[:-4]
+            bndbox.append(0.0)  # theta, radians; axis-aligned VOC boxes
+            res = np.vstack((res, bndbox))  # [xmin, ymin, xmax, ymax, label_ind, theta]
 
         width = int(target.find("size").find("width").text)
         height = int(target.find("size").find("height").text)

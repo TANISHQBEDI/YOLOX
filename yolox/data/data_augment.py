@@ -15,7 +15,7 @@ import random
 import cv2
 import numpy as np
 
-from yolox.utils import xyxy2cxcywh
+from yolox.utils import NUM_OBB_LABELS, ensure_theta_column, wrap_angle, xyxy2cxcywh
 
 
 def augment_hsv(img, hgain=5, sgain=30, vgain=30):
@@ -76,38 +76,39 @@ def get_affine_matrix(
     M[0, 2] = translation_x
     M[1, 2] = translation_y
 
-    return M, scale
+    return M, scale, angle
 
 
-def apply_affine_to_bboxes(targets, target_size, M, scale):
+def apply_affine_to_bboxes(targets, target_size, M, scale, angle_deg=0):
     num_gts = len(targets)
+    if num_gts == 0:
+        return targets
 
-    # warp corner points
     twidth, theight = target_size
-    corner_points = np.ones((4 * num_gts, 3))
-    corner_points[:, :2] = targets[:, [0, 1, 2, 3, 0, 3, 2, 1]].reshape(
-        4 * num_gts, 2
-    )  # x1y1, x2y2, x1y2, x2y1
-    corner_points = corner_points @ M.T  # apply affine transform
-    corner_points = corner_points.reshape(num_gts, 8)
+    targets = ensure_theta_column(targets)
 
-    # create new boxes
-    corner_xs = corner_points[:, 0::2]
-    corner_ys = corner_points[:, 1::2]
-    new_bboxes = (
-        np.concatenate(
-            (corner_xs.min(1), corner_ys.min(1), corner_xs.max(1), corner_ys.max(1))
-        )
-        .reshape(4, num_gts)
-        .T
-    )
+    # Keep oriented (w, h); rotate the center and add the affine rotation to theta.
+    cx = (targets[:, 0] + targets[:, 2]) * 0.5
+    cy = (targets[:, 1] + targets[:, 3]) * 0.5
+    w = (targets[:, 2] - targets[:, 0]) * scale
+    h = (targets[:, 3] - targets[:, 1]) * scale
 
-    # clip boxes
-    new_bboxes[:, 0::2] = new_bboxes[:, 0::2].clip(0, twidth)
-    new_bboxes[:, 1::2] = new_bboxes[:, 1::2].clip(0, theight)
+    ones = np.ones_like(cx)
+    centers = np.stack([cx, cy, ones], axis=1)
+    new_centers = centers @ M.T
+    new_cx, new_cy = new_centers[:, 0], new_centers[:, 1]
 
-    targets[:, :4] = new_bboxes
+    x1 = (new_cx - w * 0.5).clip(0, twidth)
+    y1 = (new_cy - h * 0.5).clip(0, theight)
+    x2 = (new_cx + w * 0.5).clip(0, twidth)
+    y2 = (new_cy + h * 0.5).clip(0, theight)
+    targets[:, 0] = x1
+    targets[:, 1] = y1
+    targets[:, 2] = x2
+    targets[:, 3] = y2
 
+    angle_rad = math.radians(angle_deg)
+    targets[:, 5] = wrap_angle(targets[:, 5] + angle_rad)
     return targets
 
 
@@ -120,23 +121,24 @@ def random_affine(
     scales=0.1,
     shear=10,
 ):
-    M, scale = get_affine_matrix(target_size, degrees, translate, scales, shear)
+    M, scale, angle = get_affine_matrix(target_size, degrees, translate, scales, shear)
 
     img = cv2.warpAffine(img, M, dsize=target_size, borderValue=(114, 114, 114))
 
     # Transform label coordinates
     if len(targets) > 0:
-        targets = apply_affine_to_bboxes(targets, target_size, M, scale)
+        targets = apply_affine_to_bboxes(targets, target_size, M, scale, angle)
 
     return img, targets
 
 
-def _mirror(image, boxes, prob=0.5):
+def _mirror(image, boxes, thetas, prob=0.5):
     _, width, _ = image.shape
     if random.random() < prob:
         image = image[:, ::-1]
         boxes[:, 0::2] = width - boxes[:, 2::-2]
-    return image, boxes
+        thetas = wrap_angle(-thetas)
+    return image, boxes, thetas
 
 
 def preproc(img, input_size, swap=(2, 0, 1)):
@@ -165,10 +167,12 @@ class TrainTransform:
         self.hsv_prob = hsv_prob
 
     def __call__(self, image, targets, input_dim):
+        targets = ensure_theta_column(targets)
         boxes = targets[:, :4].copy()
         labels = targets[:, 4].copy()
+        thetas = targets[:, 5].copy()
         if len(boxes) == 0:
-            targets = np.zeros((self.max_labels, 5), dtype=np.float32)
+            targets = np.zeros((self.max_labels, NUM_OBB_LABELS), dtype=np.float32)
             image, r_o = preproc(image, input_dim)
             return image, targets
 
@@ -177,12 +181,13 @@ class TrainTransform:
         height_o, width_o, _ = image_o.shape
         boxes_o = targets_o[:, :4]
         labels_o = targets_o[:, 4]
+        thetas_o = targets_o[:, 5]
         # bbox_o: [xyxy] to [c_x,c_y,w,h]
         boxes_o = xyxy2cxcywh(boxes_o)
 
         if random.random() < self.hsv_prob:
             augment_hsv(image)
-        image_t, boxes = _mirror(image, boxes, self.flip_prob)
+        image_t, boxes, thetas = _mirror(image, boxes, thetas, self.flip_prob)
         height, width, _ = image_t.shape
         image_t, r_ = preproc(image_t, input_dim)
         # boxes [xyxy] 2 [cx,cy,w,h]
@@ -192,17 +197,20 @@ class TrainTransform:
         mask_b = np.minimum(boxes[:, 2], boxes[:, 3]) > 1
         boxes_t = boxes[mask_b]
         labels_t = labels[mask_b]
+        thetas_t = thetas[mask_b]
 
         if len(boxes_t) == 0:
             image_t, r_o = preproc(image_o, input_dim)
             boxes_o *= r_o
             boxes_t = boxes_o
             labels_t = labels_o
+            thetas_t = thetas_o
 
         labels_t = np.expand_dims(labels_t, 1)
+        thetas_t = np.expand_dims(thetas_t, 1)
 
-        targets_t = np.hstack((labels_t, boxes_t))
-        padded_labels = np.zeros((self.max_labels, 5))
+        targets_t = np.hstack((labels_t, boxes_t, thetas_t))
+        padded_labels = np.zeros((self.max_labels, NUM_OBB_LABELS))
         padded_labels[range(len(targets_t))[: self.max_labels]] = targets_t[
             : self.max_labels
         ]
@@ -240,4 +248,4 @@ class ValTransform:
             img /= 255.0
             img -= np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
             img /= np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
-        return img, np.zeros((1, 5))
+        return img, np.zeros((1, NUM_OBB_LABELS))
