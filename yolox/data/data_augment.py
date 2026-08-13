@@ -15,7 +15,15 @@ import random
 import cv2
 import numpy as np
 
-from yolox.utils import NUM_OBB_LABELS, ensure_theta_column, wrap_angle, xyxy2cxcywh
+from yolox.utils import (
+    NUM_OBB_LABELS,
+    canonicalize_rbox,
+    canonicalize_xyxy_theta,
+    ensure_theta_column,
+    transform_obb_xyxy,
+    wrap_angle,
+    xyxy2cxcywh,
+)
 
 
 def augment_hsv(img, hgain=5, sgain=30, vgain=30):
@@ -79,37 +87,15 @@ def get_affine_matrix(
     return M, scale, angle
 
 
-def apply_affine_to_bboxes(targets, target_size, M, scale, angle_deg=0):
-    num_gts = len(targets)
-    if num_gts == 0:
-        return targets
+def apply_affine_to_bboxes(targets, target_size, M, scale=None, angle_deg=0):
+    """Warp OBB labels with the same 2x3 matrix applied to the image.
 
+    ``scale`` and ``angle_deg`` are unused: they are already baked into M.
+    Kept in the signature so existing call sites do not break.
+    """
+    del scale, angle_deg
     twidth, theight = target_size
-    targets = ensure_theta_column(targets)
-
-    # Keep oriented (w, h); rotate the center and add the affine rotation to theta.
-    cx = (targets[:, 0] + targets[:, 2]) * 0.5
-    cy = (targets[:, 1] + targets[:, 3]) * 0.5
-    w = (targets[:, 2] - targets[:, 0]) * scale
-    h = (targets[:, 3] - targets[:, 1]) * scale
-
-    ones = np.ones_like(cx)
-    centers = np.stack([cx, cy, ones], axis=1)
-    new_centers = centers @ M.T
-    new_cx, new_cy = new_centers[:, 0], new_centers[:, 1]
-
-    x1 = (new_cx - w * 0.5).clip(0, twidth)
-    y1 = (new_cy - h * 0.5).clip(0, theight)
-    x2 = (new_cx + w * 0.5).clip(0, twidth)
-    y2 = (new_cy + h * 0.5).clip(0, theight)
-    targets[:, 0] = x1
-    targets[:, 1] = y1
-    targets[:, 2] = x2
-    targets[:, 3] = y2
-
-    angle_rad = math.radians(angle_deg)
-    targets[:, 5] = wrap_angle(targets[:, 5] + angle_rad)
-    return targets
+    return transform_obb_xyxy(targets, M, twidth, theight)
 
 
 def random_affine(
@@ -188,6 +174,7 @@ class TrainTransform:
         if random.random() < self.hsv_prob:
             augment_hsv(image)
         image_t, boxes, thetas = _mirror(image, boxes, thetas, self.flip_prob)
+        boxes, thetas = canonicalize_xyxy_theta(boxes, thetas)
         height, width, _ = image_t.shape
         image_t, r_ = preproc(image_t, input_dim)
         # boxes [xyxy] 2 [cx,cy,w,h]
@@ -206,8 +193,14 @@ class TrainTransform:
             labels_t = labels_o
             thetas_t = thetas_o
 
+        if len(boxes_t):
+            cx, cy, w, h, thetas_t = canonicalize_rbox(
+                boxes_t[:, 0], boxes_t[:, 1], boxes_t[:, 2], boxes_t[:, 3], thetas_t
+            )
+            boxes_t = np.stack((cx, cy, w, h), axis=1)
+
         labels_t = np.expand_dims(labels_t, 1)
-        thetas_t = np.expand_dims(thetas_t, 1)
+        thetas_t = np.expand_dims(np.asarray(thetas_t).reshape(-1), 1)
 
         targets_t = np.hstack((labels_t, boxes_t, thetas_t))
         padded_labels = np.zeros((self.max_labels, NUM_OBB_LABELS))

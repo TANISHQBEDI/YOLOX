@@ -19,6 +19,7 @@ import torch
 
 from yolox.data.datasets import COCO_CLASSES
 from yolox.utils import (
+    canonicalize_rbox,
     gather,
     is_main_process,
     oriented_xyxy_theta_to_aabb,
@@ -27,6 +28,8 @@ from yolox.utils import (
     time_synchronized,
     xyxy2xywh
 )
+
+from .rotated_eval import gt_rboxes_from_dataset, summarize_rotated_metrics
 
 
 def per_class_AR_table(coco_eval, class_names=COCO_CLASSES, headers=["class", "AR"], colums=6):
@@ -139,6 +142,7 @@ class COCOEvaluator:
             model = model.half()
         ids = []
         data_list = []
+        rbox_list = []
         output_data = defaultdict()
         progress_bar = tqdm if is_main_process() else iter
 
@@ -182,9 +186,10 @@ class COCOEvaluator:
                     nms_end = time_synchronized()
                     nms_time += nms_end - infer_end
 
-            data_list_elem, image_wise_data = self.convert_to_coco_format(
+            data_list_elem, image_wise_data, rbox_elem = self.convert_to_coco_format(
                 outputs, info_imgs, ids, return_outputs=True)
             data_list.extend(data_list_elem)
+            rbox_list.extend(rbox_elem)
             output_data.update(image_wise_data)
 
         statistics = torch.cuda.FloatTensor([inference_time, nms_time, n_samples])
@@ -193,12 +198,14 @@ class COCOEvaluator:
             # to make sure the process will not be stucked, sync func is used here.
             synchronize()
             data_list = gather(data_list, dst=0)
+            rbox_list = gather(rbox_list, dst=0)
             output_data = gather(output_data, dst=0)
             data_list = list(itertools.chain(*data_list))
+            rbox_list = list(itertools.chain(*rbox_list))
             output_data = dict(ChainMap(*output_data))
             torch.distributed.reduce(statistics, dst=0)
 
-        eval_results = self.evaluate_prediction(data_list, statistics)
+        eval_results = self.evaluate_prediction(data_list, statistics, rbox_list)
         synchronize()
 
         if return_outputs:
@@ -207,6 +214,7 @@ class COCOEvaluator:
 
     def convert_to_coco_format(self, outputs, info_imgs, ids, return_outputs=False):
         data_list = []
+        rbox_list = []
         image_wise_data = defaultdict(dict)
         for (output, img_h, img_w, img_id) in zip(
             outputs, info_imgs[0], info_imgs[1], ids
@@ -222,10 +230,31 @@ class COCOEvaluator:
                 self.img_size[0] / float(img_h), self.img_size[1] / float(img_w)
             )
             bboxes /= scale
-            if output.size(1) > 7:
-                bboxes = oriented_xyxy_theta_to_aabb(bboxes, output[:, 7])
-            cls = output[:, 6]
             scores = output[:, 4] * output[:, 5]
+            cls = output[:, 6]
+
+            if output.size(1) > 7:
+                thetas = output[:, 7]
+                cx = (bboxes[:, 0] + bboxes[:, 2]) * 0.5
+                cy = (bboxes[:, 1] + bboxes[:, 3]) * 0.5
+                w = bboxes[:, 2] - bboxes[:, 0]
+                h = bboxes[:, 3] - bboxes[:, 1]
+                cx, cy, w, h, thetas = canonicalize_rbox(cx, cy, w, h, thetas)
+                for ind in range(bboxes.shape[0]):
+                    label = self.dataloader.dataset.class_ids[int(cls[ind])]
+                    rbox_list.append({
+                        "image_id": int(img_id),
+                        "category_id": label,
+                        "rbox": [
+                            float(cx[ind]),
+                            float(cy[ind]),
+                            float(w[ind]),
+                            float(h[ind]),
+                            float(thetas[ind]),
+                        ],
+                        "score": scores[ind].numpy().item(),
+                    })
+                bboxes = oriented_xyxy_theta_to_aabb(bboxes, output[:, 7])
 
             image_wise_data.update({
                 int(img_id): {
@@ -252,10 +281,10 @@ class COCOEvaluator:
                 data_list.append(pred_data)
 
         if return_outputs:
-            return data_list, image_wise_data
+            return data_list, image_wise_data, rbox_list
         return data_list
 
-    def evaluate_prediction(self, data_dict, statistics):
+    def evaluate_prediction(self, data_dict, statistics, rbox_list=None):
         if not is_main_process():
             return 0, 0, None
 
@@ -281,6 +310,11 @@ class COCOEvaluator:
         )
 
         info = time_info + "\n"
+
+        gt_rboxes = gt_rboxes_from_dataset(self.dataloader.dataset)
+        if gt_rboxes is not None:
+            rot = summarize_rotated_metrics(gt_rboxes, rbox_list or [])
+            info += rot["info"]
 
         # Evaluate the Dt (detection) json comparing with the ground truth
         if len(data_dict) > 0:

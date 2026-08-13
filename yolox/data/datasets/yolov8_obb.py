@@ -205,15 +205,24 @@ class YoloV8OBBDataset(CacheDataset):
 
         num_objs = len(objs)
         res = np.zeros((num_objs, NUM_OBB_LABELS), dtype=np.float32)
+        gt_rboxes = np.zeros((num_objs, 6), dtype=np.float32)
         if num_objs:
             res[:, :] = np.asarray(objs, dtype=np.float32)
+            gt_rboxes[:, 0] = (res[:, 0] + res[:, 2]) * 0.5
+            gt_rboxes[:, 1] = (res[:, 1] + res[:, 3]) * 0.5
+            gt_rboxes[:, 2] = res[:, 2] - res[:, 0]
+            gt_rboxes[:, 3] = res[:, 3] - res[:, 1]
+            gt_rboxes[:, 4] = res[:, 5]
+            gt_rboxes[:, 5] = [
+                self.class_ids[int(c)] for c in res[:, 4]
+            ]
 
         r = min(self.img_size[0] / height, self.img_size[1] / width)
         res[:, :4] *= r
 
         img_info = (height, width)
         resized_info = (int(height * r), int(width * r))
-        return (res, img_info, resized_info, file_name, aabb_xywh)
+        return (res, img_info, resized_info, file_name, aabb_xywh, gt_rboxes)
 
     def load_anno(self, index):
         return self.annotations[index][0]
@@ -239,9 +248,14 @@ class YoloV8OBBDataset(CacheDataset):
         return self.load_resized_img(index)
 
     def pull_item(self, index):
-        label, origin_image_size, _, _, _ = self.annotations[index]
+        label, origin_image_size, _, _, _, _ = self.annotations[index]
         img = self.read_img(index)
         return img, copy.deepcopy(label), origin_image_size, np.array([self.ids[index]])
+
+    @property
+    def gt_rboxes(self):
+        """Original-pixel rboxes [cx, cy, w, h, theta, category_id] per image."""
+        return [ann[5] for ann in self.annotations]
 
     @CacheDataset.mosaic_getitem
     def __getitem__(self, index):
@@ -260,7 +274,8 @@ class YoloV8OBBDataset(CacheDataset):
             for cid, name in zip(self.class_ids, self._classes)
         ]
         ann_id = 1
-        for img_id, (_, img_info, _, file_name, aabb_xywh) in enumerate(self.annotations):
+        for img_id, rec in enumerate(self.annotations):
+            _, img_info, _, file_name, aabb_xywh = rec[:5]
             height, width = img_info
             images.append({
                 "id": img_id,

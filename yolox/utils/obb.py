@@ -28,6 +28,9 @@ __all__ = [
     "yolov8_poly_to_rbox",
     "oriented_xyxy_theta_to_aabb",
     "canonicalize_rbox",
+    "canonicalize_xyxy_theta",
+    "oriented_xyxy_to_corners",
+    "transform_obb_xyxy",
     "kfiou_loss",
     "kfiou_matrix",
     "rbox_to_aabb_xyxy",
@@ -176,10 +179,110 @@ def canonicalize_rbox(cx, cy, w, h, theta):
         h_new = torch.where(swap, w, h)
         theta = wrap_angle(torch.where(swap, theta + math.pi / 2.0, theta))
         return cx, cy, w_new, h_new, theta
-    if h > w:
-        w, h = h, w
-        theta = theta + math.pi / 2.0
-    return cx, cy, w, h, wrap_angle(theta)
+    cx_out, cy_out = np.asarray(cx), np.asarray(cy)
+    w_arr = np.asarray(w, dtype=np.float64)
+    h_arr = np.asarray(h, dtype=np.float64)
+    th_arr = np.asarray(theta, dtype=np.float64)
+    swap = h_arr > w_arr
+    w_new = np.where(swap, h_arr, w_arr)
+    h_new = np.where(swap, w_arr, h_arr)
+    th_new = wrap_angle(np.where(swap, th_arr + math.pi / 2.0, th_arr))
+    if np.ndim(w_new) == 0:
+        return float(cx_out), float(cy_out), float(w_new), float(h_new), float(th_new)
+    return (
+        cx_out.astype(np.float32, copy=False),
+        cy_out.astype(np.float32, copy=False),
+        w_new.astype(np.float32),
+        h_new.astype(np.float32),
+        th_new.astype(np.float32),
+    )
+
+
+def canonicalize_xyxy_theta(xyxy, theta):
+    """Canonicalize oriented extents stored as xyxy + theta (numpy)."""
+    xyxy = np.asarray(xyxy, dtype=np.float32)
+    if xyxy.size == 0:
+        return xyxy.reshape(0, 4), np.asarray(theta, dtype=np.float32).reshape(-1)
+    theta = np.asarray(theta, dtype=np.float32).reshape(-1)
+    cx = (xyxy[:, 0] + xyxy[:, 2]) * 0.5
+    cy = (xyxy[:, 1] + xyxy[:, 3]) * 0.5
+    w = xyxy[:, 2] - xyxy[:, 0]
+    h = xyxy[:, 3] - xyxy[:, 1]
+    cx, cy, w, h, theta = canonicalize_rbox(cx, cy, w, h, theta)
+    out = np.stack((cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5), axis=1)
+    return out.astype(np.float32, copy=False), np.asarray(theta, dtype=np.float32).reshape(-1)
+
+
+def oriented_xyxy_to_corners(xyxy, theta):
+    """Oriented extents (N,4) + theta (N,) -> corners (N,4,2)."""
+    xyxy = np.asarray(xyxy, dtype=np.float64)
+    theta = np.asarray(theta, dtype=np.float64).reshape(-1)
+    cx = (xyxy[:, 0] + xyxy[:, 2]) * 0.5
+    cy = (xyxy[:, 1] + xyxy[:, 3]) * 0.5
+    hw = (xyxy[:, 2] - xyxy[:, 0]) * 0.5
+    hh = (xyxy[:, 3] - xyxy[:, 1]) * 0.5
+    c = np.cos(theta)
+    s = np.sin(theta)
+    dx = np.stack((hw, hw, -hw, -hw), axis=1)
+    dy = np.stack((hh, -hh, -hh, hh), axis=1)
+    rx = c[:, None] * dx - s[:, None] * dy
+    ry = s[:, None] * dx + c[:, None] * dy
+    return np.stack((cx[:, None] + rx, cy[:, None] + ry), axis=-1)
+
+
+def _corners_to_canonical_rbox(corners):
+    """Fit min-area rectangles to (N,4,2) corners and canonicalize."""
+    n = corners.shape[0]
+    cx = np.empty(n, dtype=np.float32)
+    cy = np.empty(n, dtype=np.float32)
+    w = np.empty(n, dtype=np.float32)
+    h = np.empty(n, dtype=np.float32)
+    theta = np.empty(n, dtype=np.float32)
+    for i, pts in enumerate(corners):
+        (rcx, rcy), (bw, bh), angle_deg = cv2.minAreaRect(pts.astype(np.float32))
+        rcx, rcy, bw, bh, th = canonicalize_rbox(
+            float(rcx), float(rcy), float(bw), float(bh),
+            wrap_angle(math.radians(float(angle_deg))),
+        )
+        cx[i], cy[i], w[i], h[i], theta[i] = rcx, rcy, bw, bh, th
+    return cx, cy, w, h, theta
+
+
+def transform_obb_xyxy(targets, M, img_w, img_h):
+    """
+    Apply a 2x3 affine to labels [x1, y1, x2, y2, cls, theta].
+
+    Corners go through the full matrix (rotation, isotropic scale, shear,
+    translation). The parallelogram is refit with minAreaRect, then
+    canonicalized so w >= h. Boxes whose center is outside the canvas
+    or whose size collapses are dropped.
+
+    Do not also multiply w,h by scale or add angle to theta: those are
+    already in M. Clipping unrotated xyxy is wrong for a rotated box.
+    """
+    targets = ensure_theta_column(targets)
+    if len(targets) == 0:
+        return targets
+    corners = oriented_xyxy_to_corners(targets[:, :4], targets[:, 5])
+    ones = np.ones((corners.shape[0], 4, 1), dtype=np.float64)
+    warped = np.concatenate((corners, ones), axis=-1) @ np.asarray(M, dtype=np.float64).T
+    cx, cy, w, h, theta = _corners_to_canonical_rbox(warped)
+    keep = (
+        (cx >= 0) & (cx < float(img_w))
+        & (cy >= 0) & (cy < float(img_h))
+        & (w > 1.0) & (h > 1.0)
+        & np.isfinite(theta)
+    )
+    if not np.any(keep):
+        return np.zeros((0, targets.shape[1]), dtype=targets.dtype)
+    out = targets[keep].copy()
+    cx, cy, w, h, theta = cx[keep], cy[keep], w[keep], h[keep], theta[keep]
+    out[:, 0] = cx - w * 0.5
+    out[:, 1] = cy - h * 0.5
+    out[:, 2] = cx + w * 0.5
+    out[:, 3] = cy + h * 0.5
+    out[:, 5] = theta
+    return out
 
 
 def _det2(mat):

@@ -360,5 +360,95 @@ class TestLossWeights(unittest.TestCase):
         self.assertEqual(model.head.angle_weight, 0.5)
 
 
+class TestAffineOBB(unittest.TestCase):
+    def test_90_deg_keeps_long_edge_as_width(self):
+        import cv2
+        from yolox.data.data_augment import apply_affine_to_bboxes
+
+        M = cv2.getRotationMatrix2D((100.0, 100.0), 90.0, 1.0)
+        targets = np.array([[80.0, 90.0, 120.0, 110.0, 0.0, 0.0]], dtype=np.float32)
+        out = apply_affine_to_bboxes(targets, (200, 200), M, scale=1.0, angle_deg=90)
+        self.assertEqual(len(out), 1)
+        w = float(out[0, 2] - out[0, 0])
+        h = float(out[0, 3] - out[0, 1])
+        self.assertGreaterEqual(w, h)
+        self.assertAlmostEqual(w, 40.0, delta=1.0)
+        self.assertAlmostEqual(h, 20.0, delta=1.0)
+        self.assertLess(abs(abs(math.degrees(float(out[0, 5]))) - 90.0), 3.0)
+
+    def test_shear_refits_angle_not_just_center(self):
+        import cv2
+        from yolox.data.data_augment import apply_affine_to_bboxes
+
+        R = cv2.getRotationMatrix2D(angle=0.0, center=(0.0, 0.0), scale=1.0)
+        M = np.ones((2, 3), dtype=np.float64)
+        shear_x = math.tan(20.0 * math.pi / 180.0)
+        M[0] = R[0]
+        M[1] = R[1] + shear_x * R[0]
+        M[0, 2] = 0.0
+        M[1, 2] = 0.0
+        targets = np.array([[80.0, 90.0, 120.0, 110.0, 0.0, 0.0]], dtype=np.float32)
+        out = apply_affine_to_bboxes(targets, (200, 200), M)
+        self.assertEqual(len(out), 1)
+        w = float(out[0, 2] - out[0, 0])
+        h = float(out[0, 3] - out[0, 1])
+        self.assertGreaterEqual(w, h)
+        self.assertTrue(np.isfinite(out).all())
+        # Old path added angle_deg=0 and left theta=0; shear must rotate the box.
+        self.assertGreater(abs(float(out[0, 5])), 0.05)
+
+    def test_numpy_canonicalize_batch(self):
+        cx = np.array([0.0, 1.0], dtype=np.float32)
+        cy = np.array([0.0, 1.0], dtype=np.float32)
+        w = np.array([10.0, 8.0], dtype=np.float32)
+        h = np.array([40.0, 3.0], dtype=np.float32)
+        th = np.array([0.0, 0.1], dtype=np.float32)
+        _, _, w2, h2, _ = canonicalize_rbox(cx, cy, w, h, th)
+        self.assertTrue(np.all(w2 >= h2))
+
+
+class TestRotatedEval(unittest.TestCase):
+    def test_identical_rbox_iou_is_one(self):
+        from yolox.evaluators.rotated_eval import box_iou_rotated
+
+        box = np.array([[50.0, 40.0, 30.0, 10.0, 0.4]])
+        iou = box_iou_rotated(box, box)
+        self.assertAlmostEqual(float(iou[0, 0]), 1.0, places=3)
+
+    def test_perfect_match_ap50_and_recall(self):
+        from yolox.evaluators.rotated_eval import eval_rotated_ap
+
+        gt = {0: np.array([[50.0, 50.0, 40.0, 20.0, 0.3, 1.0]])}
+        preds = [{
+            "image_id": 0,
+            "category_id": 1,
+            "rbox": [50.0, 50.0, 40.0, 20.0, 0.3],
+            "score": 0.9,
+        }]
+        ap, rec = eval_rotated_ap(gt, preds, iou_thr=0.5)
+        self.assertAlmostEqual(ap, 1.0, places=3)
+        self.assertAlmostEqual(rec, 1.0, places=3)
+
+    def test_missing_pred_recall_is_zero(self):
+        from yolox.evaluators.rotated_eval import eval_rotated_ap
+
+        gt = {0: np.array([[50.0, 50.0, 40.0, 20.0, 0.0, 1.0]])}
+        ap, rec = eval_rotated_ap(gt, [], iou_thr=0.5)
+        self.assertEqual(ap, 0.0)
+        self.assertEqual(rec, 0.0)
+
+    def test_angle_error_hurts_rotated_iou_more_than_aabb(self):
+        from yolox.evaluators.rotated_eval import box_iou_rotated
+        from yolox.utils.boxes import bboxes_iou
+
+        gt = torch.tensor([[50.0, 50.0, 40.0, 8.0, math.radians(30.0)]])
+        pred = torch.tensor([[50.0, 50.0, 40.0, 8.0, 0.0]])
+        aabb_iou = float(
+            bboxes_iou(rbox_to_aabb_xyxy(gt), rbox_to_aabb_xyxy(pred), xyxy=True)[0, 0]
+        )
+        r_iou = float(box_iou_rotated(gt.numpy(), pred.numpy())[0, 0])
+        self.assertGreater(aabb_iou, r_iou)
+
+
 if __name__ == "__main__":
     unittest.main()

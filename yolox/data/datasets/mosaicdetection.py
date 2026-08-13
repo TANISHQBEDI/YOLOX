@@ -7,7 +7,13 @@ import random
 import cv2
 import numpy as np
 
-from yolox.utils import adjust_box_anns, ensure_theta_column, get_local_rank, wrap_angle
+from yolox.utils import (
+    adjust_box_anns,
+    canonicalize_xyxy_theta,
+    ensure_theta_column,
+    get_local_rank,
+    wrap_angle,
+)
 
 from ..data_augment import random_affine
 from .datasets_wrapper import Dataset
@@ -120,10 +126,9 @@ class MosaicDetection(Dataset):
 
             if len(mosaic_labels):
                 mosaic_labels = np.concatenate(mosaic_labels, 0)
-                np.clip(mosaic_labels[:, 0], 0, 2 * input_w, out=mosaic_labels[:, 0])
-                np.clip(mosaic_labels[:, 1], 0, 2 * input_h, out=mosaic_labels[:, 1])
-                np.clip(mosaic_labels[:, 2], 0, 2 * input_w, out=mosaic_labels[:, 2])
-                np.clip(mosaic_labels[:, 3], 0, 2 * input_h, out=mosaic_labels[:, 3])
+                # Do not clip oriented xyxy here: that shrinks w,h without
+                # changing theta. random_affine refits corners and drops
+                # boxes whose center is outside the output canvas.
 
             mosaic_img, mosaic_labels = random_affine(
                 mosaic_img,
@@ -226,11 +231,11 @@ class MosaicDetection(Dataset):
 
         cp_labels = ensure_theta_column(cp_labels)
         cls_labels = cp_labels[:, 4:5].copy()
-        thetas = cp_labels[:, 5:6].copy()
+        thetas = cp_labels[:, 5].copy()
         if FLIP:
             thetas = wrap_angle(-thetas)
-        box_labels = cp_bboxes_transformed_np
-        labels = np.hstack((box_labels, cls_labels, thetas))
+        box_labels, thetas = canonicalize_xyxy_theta(cp_bboxes_transformed_np, thetas)
+        labels = np.hstack((box_labels, cls_labels, thetas.reshape(-1, 1)))
         origin_labels = ensure_theta_column(origin_labels)
         origin_labels = np.vstack((origin_labels, labels))
         origin_img = origin_img.astype(np.float32)

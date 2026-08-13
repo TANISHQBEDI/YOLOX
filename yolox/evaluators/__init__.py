@@ -4,3 +4,4 @@
 
 from .coco_evaluator import COCOEvaluator
 from .voc_evaluator import VOCEvaluator
+from .rotated_eval import box_iou_rotated, eval_rotated_ap, summarize_rotated_metrics
