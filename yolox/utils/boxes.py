@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torchvision
 
-from .obb import decode_angle
+from .obb import decode_angle, oriented_xyxy_theta_to_aabb
 
 __all__ = [
     "filter_box",
@@ -61,15 +61,19 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
         if not detections.size(0):
             continue
 
+        nms_boxes = detections[:, :4]
+        if detections.size(1) > 7:
+            nms_boxes = oriented_xyxy_theta_to_aabb(detections[:, :4], detections[:, 7])
+
         if class_agnostic:
             nms_out_index = torchvision.ops.nms(
-                detections[:, :4],
+                nms_boxes,
                 detections[:, 4] * detections[:, 5],
                 nms_thre,
             )
         else:
             nms_out_index = torchvision.ops.batched_nms(
-                detections[:, :4],
+                nms_boxes,
                 detections[:, 4] * detections[:, 5],
                 detections[:, 6],
                 nms_thre,

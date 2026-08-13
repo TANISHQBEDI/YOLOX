@@ -16,6 +16,7 @@ from yolox.utils.obb import (
     decode_angle,
     encode_angle,
     hflip_obb_label,
+    oriented_xyxy_theta_to_aabb,
     rotate_obb_label,
     yolov8_poly_to_rbox,
 )
@@ -131,6 +132,23 @@ class TestYoloV8OBBDataset(unittest.TestCase):
         self.assertGreaterEqual(n, 0)
         if n > 0:
             self.assertTrue(np.isfinite(labels[:n, 5]).all())
+
+
+class TestAABBfromOBB(unittest.TestCase):
+    def test_zero_angle_is_identity(self):
+        xyxy = torch.tensor([[10.0, 20.0, 30.0, 50.0]])
+        theta = torch.tensor([0.0])
+        aabb = oriented_xyxy_theta_to_aabb(xyxy, theta)
+        self.assertTrue(torch.allclose(aabb, xyxy, atol=1e-5))
+
+    def test_90_deg_swaps_extents(self):
+        # oriented 20x40 box at (50, 50)
+        xyxy = torch.tensor([[40.0, 30.0, 60.0, 70.0]])
+        theta = torch.tensor([math.pi / 2])
+        aabb = oriented_xyxy_theta_to_aabb(xyxy, theta)[0]
+        # hull should be 40x20
+        self.assertAlmostEqual(float(aabb[2] - aabb[0]), 40.0, places=4)
+        self.assertAlmostEqual(float(aabb[3] - aabb[1]), 20.0, places=4)
 
 
 if __name__ == "__main__":

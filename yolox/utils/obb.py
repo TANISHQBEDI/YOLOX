@@ -26,6 +26,7 @@ __all__ = [
     "rotate_obb_label",
     "hflip_obb_label",
     "yolov8_poly_to_rbox",
+    "oriented_xyxy_theta_to_aabb",
 ]
 
 # Dataset labels: [x1, y1, x2, y2, cls, theta]
@@ -138,3 +139,25 @@ def yolov8_poly_to_rbox(poly, img_w, img_h):
     (cx, cy), (bw, bh), angle_deg = cv2.minAreaRect(pts.astype(np.float32))
     theta = wrap_angle(math.radians(float(angle_deg)))
     return float(cx), float(cy), float(bw), float(bh), float(theta), aabb
+
+
+def oriented_xyxy_theta_to_aabb(xyxy, theta):
+    """
+    Axis-aligned hull of an oriented box.
+
+    xyxy is (N, 4) built from oriented (w, h) as if unrotated: the visual /
+    training extents. theta is (N,) radians. Used for NMS and COCO eval so
+    those steps match the GT AABB envelope.
+    """
+    x1, y1, x2, y2 = xyxy.unbind(-1)
+    cx = (x1 + x2) * 0.5
+    cy = (y1 + y2) * 0.5
+    hw = (x2 - x1) * 0.5
+    hh = (y2 - y1) * 0.5
+    c = torch.cos(theta).abs()
+    s = torch.sin(theta).abs()
+    aabb_hw = c * hw + s * hh
+    aabb_hh = s * hw + c * hh
+    return torch.stack(
+        (cx - aabb_hw, cy - aabb_hh, cx + aabb_hw, cy + aabb_hh), dim=-1
+    )

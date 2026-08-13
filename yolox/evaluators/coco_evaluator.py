@@ -21,6 +21,7 @@ from yolox.data.datasets import COCO_CLASSES
 from yolox.utils import (
     gather,
     is_main_process,
+    oriented_xyxy_theta_to_aabb,
     postprocess,
     synchronize,
     time_synchronized,
@@ -221,6 +222,8 @@ class COCOEvaluator:
                 self.img_size[0] / float(img_h), self.img_size[1] / float(img_w)
             )
             bboxes /= scale
+            if output.size(1) > 7:
+                bboxes = oriented_xyxy_theta_to_aabb(bboxes, output[:, 7])
             cls = output[:, 6]
             scores = output[:, 4] * output[:, 5]
 
