@@ -9,7 +9,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from yolox.utils import angle_loss, bboxes_iou, cxcywh2xyxy, meshgrid, visualize_assign
+from yolox.utils import (
+    angle_loss,
+    bboxes_iou,
+    cxcywh2xyxy,
+    decode_angle,
+    kfiou_loss,
+    meshgrid,
+    rbox_to_aabb_xyxy,
+    visualize_assign,
+)
 
 from .losses import IOUloss
 from .network_blocks import BaseConv, DWConv
@@ -337,6 +346,8 @@ class YOLOXHead(nn.Module):
                         y_shifts,
                         cls_preds,
                         obj_preds,
+                        gt_angles=gt_angles_per_image,
+                        angle_preds=angle_preds[batch_idx],
                     )
                 except RuntimeError as e:
                     # TODO: the string might change, consider a better way
@@ -367,6 +378,8 @@ class YOLOXHead(nn.Module):
                         cls_preds,
                         obj_preds,
                         "cpu",
+                        gt_angles=gt_angles_per_image,
+                        angle_preds=angle_preds[batch_idx],
                     )
 
                 torch.cuda.empty_cache()
@@ -404,9 +417,13 @@ class YOLOXHead(nn.Module):
             l1_targets = torch.cat(l1_targets, 0)
 
         num_fg = max(num_fg, 1)
-        loss_iou = (
-            self.iou_loss(bbox_preds.view(-1, 4)[fg_masks], reg_targets)
-        ).sum() / num_fg
+        pred_angle = angle_preds.view(-1, 2)[fg_masks]
+        pred_theta = decode_angle(pred_angle[:, 0], pred_angle[:, 1])
+        pred_rbox = torch.cat(
+            (bbox_preds.view(-1, 4)[fg_masks], pred_theta.unsqueeze(-1)), dim=1
+        )
+        gt_rbox = torch.cat((reg_targets, angle_targets.unsqueeze(-1)), dim=1)
+        loss_iou = kfiou_loss(pred_rbox, gt_rbox).sum() / num_fg
         loss_obj = (
             self.bcewithlog_loss(obj_preds.view(-1, 1), obj_targets)
         ).sum() / num_fg
@@ -422,13 +439,14 @@ class YOLOXHead(nn.Module):
         else:
             loss_l1 = 0.0
 
-        pred_angle = angle_preds.view(-1, 2)[fg_masks]
         loss_angle = (
             angle_loss(pred_angle[:, 0], pred_angle[:, 1], angle_targets)
         ).sum() / num_fg
 
         reg_weight = 5.0
-        loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1 + loss_angle
+        # KFIoU already jointly scores (w,h,θ); keep a light angle term so the
+        # sin/cos head does not stall.
+        loss = reg_weight * loss_iou + loss_obj + loss_cls + loss_l1 + 0.5 * loss_angle
 
         return (
             loss,
@@ -461,6 +479,8 @@ class YOLOXHead(nn.Module):
         cls_preds,
         obj_preds,
         mode="gpu",
+        gt_angles=None,
+        angle_preds=None,
     ):
 
         if mode == "cpu":
@@ -487,8 +507,30 @@ class YOLOXHead(nn.Module):
         if mode == "cpu":
             gt_bboxes_per_image = gt_bboxes_per_image.cpu()
             bboxes_preds_per_image = bboxes_preds_per_image.cpu()
+            if gt_angles is not None:
+                gt_angles = gt_angles.cpu()
+            if angle_preds is not None:
+                angle_preds = angle_preds.cpu()
 
-        pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds_per_image, False)
+        if (
+            gt_angles is not None
+            and angle_preds is not None
+            and num_in_boxes_anchor > 0
+        ):
+            pred_theta = decode_angle(angle_preds[fg_mask][:, 0], angle_preds[fg_mask][:, 1])
+            pred_rbox = torch.cat(
+                (bboxes_preds_per_image, pred_theta.unsqueeze(-1)), dim=1
+            )
+            gt_rbox = torch.cat(
+                (gt_bboxes_per_image, gt_angles.unsqueeze(-1)), dim=1
+            )
+            pair_wise_ious = bboxes_iou(
+                rbox_to_aabb_xyxy(gt_rbox),
+                rbox_to_aabb_xyxy(pred_rbox),
+                True,
+            )
+        else:
+            pair_wise_ious = bboxes_iou(gt_bboxes_per_image, bboxes_preds_per_image, False)
 
         gt_cls_per_image = (
             F.one_hot(gt_classes.to(torch.int64), self.num_classes)
@@ -635,6 +677,7 @@ class YOLOXHead(nn.Module):
         bbox_preds = outputs[:, :, :4]  # [batch, n_anchors_all, 4]
         obj_preds = outputs[:, :, 4:5]  # [batch, n_anchors_all, 1]
         cls_preds = outputs[:, :, 5:5 + self.num_classes]
+        angle_preds = outputs[:, :, 5 + self.num_classes:7 + self.num_classes]
 
         # calculate targets
         total_num_anchors = outputs.shape[1]
@@ -651,11 +694,14 @@ class YOLOXHead(nn.Module):
             else:
                 gt_bboxes_per_image = label[:num_gt, 1:5]
                 gt_classes = label[:num_gt, 0]
+                gt_angles = label[:num_gt, 5] if label.shape[-1] >= 6 else None
                 bboxes_preds_per_image = bbox_preds[batch_idx]
                 _, fg_mask, _, matched_gt_inds, _ = self.get_assignments(  # noqa
                     batch_idx, num_gt, gt_bboxes_per_image, gt_classes,
                     bboxes_preds_per_image, expanded_strides, x_shifts,
                     y_shifts, cls_preds, obj_preds,
+                    gt_angles=gt_angles,
+                    angle_preds=angle_preds[batch_idx] if angle_preds is not None else None,
                 )
 
             img = img.cpu().numpy().copy()  # copy is crucial here

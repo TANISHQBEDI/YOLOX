@@ -13,9 +13,12 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from yolox.utils.obb import (
+    canonicalize_rbox,
     decode_angle,
     encode_angle,
     hflip_obb_label,
+    kfiou_loss,
+    kfiou_matrix,
     oriented_xyxy_theta_to_aabb,
     rotate_obb_label,
     yolov8_poly_to_rbox,
@@ -149,6 +152,32 @@ class TestAABBfromOBB(unittest.TestCase):
         # hull should be 40x20
         self.assertAlmostEqual(float(aabb[2] - aabb[0]), 40.0, places=4)
         self.assertAlmostEqual(float(aabb[3] - aabb[1]), 20.0, places=4)
+
+
+class TestCanonicalizeAndKFIoU(unittest.TestCase):
+    def test_long_edge_is_width(self):
+        cx, cy, w, h, theta = canonicalize_rbox(0.0, 0.0, 10.0, 40.0, 0.0)
+        self.assertGreaterEqual(w, h)
+        self.assertAlmostEqual(w, 40.0)
+        self.assertAlmostEqual(h, 10.0)
+
+    def test_identical_boxes_center_loss_is_zero(self):
+        box = torch.tensor([[50.0, 50.0, 40.0, 20.0, 0.3]])
+        loss = kfiou_loss(box, box)[0]
+        # Volume KFIoU of identical Gaussians is 1/3, so 1-KFIoU=2/3; xy term is 0.
+        self.assertAlmostEqual(float(loss), 2.0 / 3.0, places=3)
+
+    def test_angle_mismatch_lowers_kfiou(self):
+        a = torch.tensor([[50.0, 50.0, 40.0, 12.0, 0.0]])
+        b = torch.tensor([[50.0, 50.0, 40.0, 12.0, math.pi / 2]])
+        same = float(kfiou_matrix(a, a)[0, 0])
+        rotated = float(kfiou_matrix(a, b)[0, 0])
+        self.assertGreater(same, rotated)
+
+    def test_far_centers_cost_more(self):
+        a = torch.tensor([[0.0, 0.0, 10.0, 10.0, 0.0]])
+        b = torch.tensor([[80.0, 80.0, 10.0, 10.0, 0.0]])
+        self.assertGreater(float(kfiou_loss(a, b)[0]), float(kfiou_loss(a, a)[0]))
 
 
 if __name__ == "__main__":

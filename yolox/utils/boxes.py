@@ -3,6 +3,7 @@
 
 import numpy as np
 
+import math
 import torch
 import torchvision
 
@@ -62,21 +63,25 @@ def postprocess(prediction, num_classes, conf_thre=0.7, nms_thre=0.45, class_agn
             continue
 
         nms_boxes = detections[:, :4]
+        scores = detections[:, 4] * detections[:, 5]
         if detections.size(1) > 7:
-            nms_boxes = oriented_xyxy_theta_to_aabb(detections[:, :4], detections[:, 7])
-
-        if class_agnostic:
-            nms_out_index = torchvision.ops.nms(
-                nms_boxes,
-                detections[:, 4] * detections[:, 5],
-                nms_thre,
-            )
+            cx = (detections[:, 0] + detections[:, 2]) * 0.5
+            cy = (detections[:, 1] + detections[:, 3]) * 0.5
+            bw = (detections[:, 2] - detections[:, 0]).clamp(min=1e-3)
+            bh = (detections[:, 3] - detections[:, 1]).clamp(min=1e-3)
+            theta_deg = detections[:, 7] * (180.0 / math.pi)
+            rboxes = torch.stack((cx, cy, bw, bh, theta_deg), dim=1)
+            nms_fn = getattr(torchvision.ops, "nms_rotated", None)
+            if nms_fn is not None:
+                nms_out_index = nms_fn(rboxes, scores, nms_thre)
+            else:
+                nms_boxes = oriented_xyxy_theta_to_aabb(detections[:, :4], detections[:, 7])
+                nms_out_index = torchvision.ops.nms(nms_boxes, scores, nms_thre)
+        elif class_agnostic:
+            nms_out_index = torchvision.ops.nms(nms_boxes, scores, nms_thre)
         else:
             nms_out_index = torchvision.ops.batched_nms(
-                nms_boxes,
-                detections[:, 4] * detections[:, 5],
-                detections[:, 6],
-                nms_thre,
+                nms_boxes, scores, detections[:, 6], nms_thre
             )
 
         detections = detections[nms_out_index]
