@@ -32,6 +32,13 @@ class Exp(MyExp):
         # Angle finetune from best_ckpt: set 1.0 / 5.0
         self.reg_weight = 5.0
         self.angle_weight = 0.5
+        # Object prior (leave weights at 0 unless you know the object's shape)
+        self.aspect_min = 0.0
+        self.aspect_max = 100.0
+        self.aspect_weight = 0.0
+        self.min_side_px = 0.0
+        self.max_side_px = 1.0e9
+        self.size_weight = 0.0
 
     def get_dataset(self, cache: bool = False, cache_type: str = "ram"):
         from yolox.data import TrainTransform, YoloV8OBBDataset

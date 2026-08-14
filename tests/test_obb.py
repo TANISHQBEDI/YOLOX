@@ -84,6 +84,7 @@ class TestYOLOXAngleHead(unittest.TestCase):
 
         outputs = model(imgs, labels)
         self.assertIn("angle_loss", outputs)
+        self.assertIn("prior_loss", outputs)
         self.assertIn("total_loss", outputs)
         self.assertTrue(torch.isfinite(outputs["angle_loss"]))
         outputs["total_loss"].backward()
@@ -326,7 +327,7 @@ class TestHeadKFIoUBackward(unittest.TestCase):
         labels = torch.zeros(1, 4, 6)
         labels[0, 0] = torch.tensor([0.0, 32.0, 32.0, 20.0, 10.0, 0.5])
         out = model(imgs, labels)
-        for key in ("iou_loss", "angle_loss", "conf_loss", "cls_loss", "total_loss"):
+        for key in ("iou_loss", "angle_loss", "conf_loss", "cls_loss", "prior_loss", "total_loss"):
             self.assertIn(key, out)
             self.assertTrue(torch.isfinite(out[key]), msg=key)
         out["total_loss"].backward()
@@ -358,6 +359,31 @@ class TestLossWeights(unittest.TestCase):
         model = exp.get_model()
         self.assertEqual(model.head.reg_weight, 5.0)
         self.assertEqual(model.head.angle_weight, 0.5)
+
+
+class TestObjectPrior(unittest.TestCase):
+    def test_square_has_zero_aspect_loss_in_band(self):
+        from yolox.utils.obb import rbox_prior_loss
+
+        box = torch.tensor([[10.0, 10.0, 40.0, 40.0, 0.0]])
+        a, s = rbox_prior_loss(box, aspect_min=0.9, aspect_max=1.1, min_side=10, max_side=80)
+        self.assertLess(float(a[0]), 1e-5)
+        self.assertLess(float(s[0]), 1e-5)
+
+    def test_skinny_box_pays_aspect(self):
+        from yolox.utils.obb import rbox_prior_loss
+
+        box = torch.tensor([[10.0, 10.0, 100.0, 10.0, 0.0]])
+        a, _ = rbox_prior_loss(box, aspect_min=1.0, aspect_max=2.0)
+        self.assertGreater(float(a[0]), 1.0)
+
+    def test_zero_prior_weight_does_not_change_total(self):
+        from yolox.exp import get_exp
+
+        exp = get_exp("exps/example/custom/yolox_s_pallets.py", None)
+        model = exp.get_model()
+        self.assertEqual(model.head.aspect_weight, 0.0)
+        self.assertEqual(model.head.size_weight, 0.0)
 
 
 class TestAffineOBB(unittest.TestCase):

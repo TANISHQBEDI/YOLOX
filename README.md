@@ -3,7 +3,27 @@
 
 This is a **YOLOX-OBB fork** of [Megvii YOLOX](https://github.com/Megvii-BaseDetection/YOLOX): same decoupled head, plus an oriented-box (OBB) angle branch for datasets like Roboflow YOLOv8-OBB pallets.
 
-`main` and `obb-rotated-assign` are kept in sync. Use either for training.
+`main` and `obb-rotated-assign` are kept in sync. **`easy-train`** is the newcomer branch: interactive notebook, named weight bank, fresh vs continue at each stage, optional object-shape priors.
+
+## Easy train (newcomers)
+
+On branch `easy-train`, open [`notebooks/train_pallets.ipynb`](notebooks/train_pallets.ipynb) on a **Kaggle GPU**.
+
+1. Pick **STAGE** = `detect` and **INIT** = `fresh` (or `continue` from a `.pth` you uploaded). Click **Apply**, then **Run All**.
+2. If boxes find pallets but stay level: STAGE = `angle`, INIT = `fresh`, Apply, Run All.
+3. STAGE = `export` → download `export/yolox_s_obb.pt`.
+
+Stable files (you never type `best_ckpt.pth`):
+
+```
+pallet_weights/01_detect_best.pth
+pallet_weights/02_angle_best.pth
+pallet_weights/latest.pth
+export/yolox_s_obb.pt
+```
+
+Object-shape priors (`aspect_min` / `aspect_weight`, `min_side_px` / `size_weight`) default to **off**. Old pallet labels are ~5:1 rectangles, not squares — leave weights at 0 unless you mean it.
+
 
 ## Oriented boxes (this fork)
 
@@ -19,6 +39,7 @@ This is a **YOLOX-OBB fork** of [Megvii YOLOX](https://github.com/Megvii-BaseDet
 | NMS | `torchvision.ops.nms_rotated` (AABB NMS fallback) |
 | Vis | Oriented polygons; class label drawn **outside** the box |
 | Demo | `exp.class_names` (not COCO `person`); on-screen FPS / infer ms / dets / tilt |
+| Object prior | Optional aspect/size loss (`aspect_weight` / `size_weight`, default 0) |
 
 Do **not** load an Ultralytics `.pt` into this head. A YOLOX OBB ckpt is a dict with a `model` state_dict (optionally `arch`). `pths/yolox_s_obb.pt` in this layout is that format; Ultralytics weights are not.
 

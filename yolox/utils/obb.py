@@ -35,6 +35,8 @@ __all__ = [
     "kfiou_matrix",
     "rbox_iou",
     "rbox_to_aabb_xyxy",
+    "rbox_prior_loss",
+    "rbox_prior_keep",
 ]
 
 # Dataset labels: [x1, y1, x2, y2, cls, theta]
@@ -82,6 +84,42 @@ def angle_loss(pred_sin2t, pred_cos2t, target_theta):
     loss_sin = F.smooth_l1_loss(pred_sin2t, target_sin2t, reduction="none")
     loss_cos = F.smooth_l1_loss(pred_cos2t, target_cos2t, reduction="none")
     return loss_sin + loss_cos
+
+
+def rbox_prior_loss(pred_rbox, aspect_min=0.0, aspect_max=100.0, min_side=0.0, max_side=1.0e9):
+    """
+    Soft object-shape prior on decoded (cx, cy, w, h, θ).
+
+    Returns per-row (aspect_loss, size_loss) of shape (N,).
+    Weights of 0 in the head skip adding these to the total.
+    """
+    w = pred_rbox[:, 2].clamp(min=1e-3)
+    h = pred_rbox[:, 3].clamp(min=1e-3)
+    long = torch.maximum(w, h)
+    short = torch.minimum(w, h)
+    aspect = long / short
+    a_min = pred_rbox.new_tensor(float(aspect_min))
+    a_max = pred_rbox.new_tensor(float(aspect_max))
+    s_min = pred_rbox.new_tensor(float(min_side))
+    s_max = pred_rbox.new_tensor(float(max_side))
+    loss_aspect = F.relu(aspect - a_max) + F.relu(a_min - aspect)
+    loss_size = F.relu(s_min - short) + F.relu(long - s_max)
+    return loss_aspect, loss_size
+
+
+def rbox_prior_keep(pred_rbox, aspect_min=0.0, aspect_max=100.0, min_side=0.0, max_side=1.0e9):
+    """Boolean mask of boxes that satisfy the object prior (inference filter)."""
+    w = pred_rbox[:, 2].clamp(min=1e-3)
+    h = pred_rbox[:, 3].clamp(min=1e-3)
+    long = torch.maximum(w, h)
+    short = torch.minimum(w, h)
+    aspect = long / short
+    return (
+        (aspect >= float(aspect_min))
+        & (aspect <= float(aspect_max))
+        & (short >= float(min_side))
+        & (long <= float(max_side))
+    )
 
 
 def ensure_theta_column(labels):
