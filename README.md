@@ -1,6 +1,126 @@
 <div align="center"><img src="assets/logo.png" width="350"></div>
 <img src="assets/demo.png" >
 
+This is a **YOLOX-OBB fork** of [Megvii YOLOX](https://github.com/Megvii-BaseDetection/YOLOX): same decoupled head, plus an oriented-box (OBB) angle branch for datasets like Roboflow YOLOv8-OBB pallets.
+
+`main` and `obb-rotated-assign` are kept in sync. Use either for training.
+
+## Oriented boxes (this fork)
+
+### What this fork adds
+
+| Piece | Behavior |
+| --- | --- |
+| Head | Extra 2-ch `angle_preds` on `reg_feat` → `(sin 2θ, cos 2θ)` |
+| Labels | After transform: `[cls, cx, cy, w, h, θ]` radians, `w ≥ h`, `θ ∈ (-π/2, π/2]` |
+| Dataset | `YoloV8OBBDataset` — Roboflow `class x1 y1 x2 y2 x3 y3 x4 y4` (normalized or px) |
+| Loss | KFIoU on decoded `(cx, cy, w, h, θ)` + `angle_weight * angle_loss` |
+| Matching | SimOTA with **rotated IoU** (`rbox_iou`), not AABB hull |
+| NMS | `torchvision.ops.nms_rotated` (AABB NMS fallback) |
+| Vis | Oriented polygons; class label drawn **outside** the box |
+| Demo | `exp.class_names` (not COCO `person`); on-screen FPS / infer ms / dets / tilt |
+
+Do **not** load an Ultralytics `.pt` into this head. A YOLOX OBB ckpt is a dict with a `model` state_dict (optionally `arch`). `pths/yolox_s_obb.pt` in this layout is that format; Ultralytics weights are not.
+
+### Dataset
+
+Default pallet root is **`../pallets`** next to this repo (`yolox.data.datasets.default_pallets_dir()`):
+
+```
+pallets/
+  data.yaml          # names: {0: Pallet-Detection}
+  train/images/  train/labels/
+  valid/images/  valid/labels/
+  test/images/   test/labels/
+```
+
+Each label line is YOLOv8-OBB:
+
+```
+class x1 y1 x2 y2 x3 y3 x4 y4
+```
+
+or `class cx cy w h theta` (θ radians, or degrees if `|θ| > π`).
+
+Exp: [`exps/example/custom/yolox_s_pallets.py`](exps/example/custom/yolox_s_pallets.py)
+
+```python
+self.num_classes = 1
+self.class_names = ("Pallet-Detection",)  # used by tools/demo.py
+self.input_size = self.test_size = (416, 416)
+self.reg_weight = 5.0    # detect stage (logged iou_loss is already this × KFIoU)
+self.angle_weight = 0.5
+```
+
+Angle finetune: set `reg_weight = 1.0`, `angle_weight = 5.0` and resume from the detect-stage `best_ckpt`.
+
+### Train
+
+Install, then (GPU example; drop `--fp16` on CPU):
+
+```shell
+git clone https://github.com/TANISHQBEDI/YOLOX.git
+cd YOLOX
+pip3 install -v -e .
+
+# Detect stage from COCO YOLOX-S (not Ultralytics)
+python tools/train.py -f exps/example/custom/yolox_s_pallets.py \
+  -d 1 -b 8 --fp16 -o -c /path/to/yolox_s.pth
+
+# Angle stage from detect best_ckpt
+# (edit the exp: reg_weight=1, angle_weight=5, max_epoch ~30)
+python tools/train.py -f exps/example/custom/yolox_s_pallets.py \
+  -d 1 -b 8 --fp16 -o -c YOLOX_outputs/yolox_s_pallets/best_ckpt.pth
+```
+
+`best_ckpt` is chosen by **AABB-hull COCO mAP**. Rotated AP50 / recall@0.5 are **printed** during eval; they do not pick the checkpoint. Val/test in the pallet export are almost upright — judge tilt on rotated train frames (or webcam), not val AP50.
+
+### Demo / webcam
+
+```shell
+python tools/demo.py image -f exps/example/custom/yolox_s_pallets.py \
+  -c pths/yolox_s_obb.pt --path /path/to/image.jpg \
+  --conf 0.25 --nms 0.45 --tsize 416 --save_result --device cpu
+
+python tools/demo.py webcam -f exps/example/custom/yolox_s_pallets.py \
+  -c pths/yolox_s_obb.pt --conf 0.25 --nms 0.45 --tsize 416 --device cpu
+```
+
+Press `q` / `Esc` to quit. Overlay: FPS, infer ms, det count, top score, max tilt. Box text uses `exp.class_names`.
+
+Eval:
+
+```shell
+python -m yolox.tools.eval -f exps/example/custom/yolox_s_pallets.py \
+  -c pths/best_ckpt-3.pth -b 8 -d 1 --conf 0.001
+```
+
+### Python API
+
+`yolox.utils.obb` (see `yolox/utils/obb.py`):
+
+| Function | Role |
+| --- | --- |
+| `encode_angle` / `decode_angle` | `θ` ↔ `(sin 2θ, cos 2θ)` |
+| `wrap_angle` / `canonicalize_rbox` | `θ ∈ (-π/2, π/2]`, `w ≥ h` |
+| `yolov8_poly_to_rbox` | 8-point label → `(cx, cy, w, h, θ, aabb)` |
+| `kfiou_loss` / `kfiou_matrix` | Gaussian KFIoU |
+| `rbox_iou` | Pairwise rotated IoU (SimOTA) |
+| `oriented_xyxy_theta_to_aabb` | Hull for COCO eval / AABB NMS fallback |
+| `vis(..., angles=)` | Draw OBB + label **above** the polygon |
+
+`postprocess` detections are `(N, 8)`:
+
+```
+x1, y1, x2, y2, obj_conf, cls_conf, cls_id, theta_radians
+```
+
+Score for vis is `obj_conf * cls_conf`. `x1..y2` are the unrotated extents of `(w, h)` around the center; `theta` orients that box.
+
+Checkpoints: `torch_load(path)["model"]` then `load_state_dict`. PyTorch 2.6+ is handled (`weights_only=False`). Trainer ckpts also store `start_epoch`, `best_ap`, optimizer; a slim `.pt` may only have `model` (+ `arch`).
+
+Helpers: `obb_reference.py` is a standalone sketch of the angle head, not imported by training.
+
 ## Introduction
 YOLOX is an anchor-free version of YOLO, with a simpler design but better performance! It aims to bridge the gap between research and industrial communities.
 For more details, please refer to our [report on Arxiv](https://arxiv.org/abs/2107.08430).
@@ -10,6 +130,7 @@ This repo is an implementation of PyTorch version YOLOX, there is also a [MegEng
 <img src="assets/git_fig.png" width="1000" >
 
 ## Updates!!
+* 【2026/08】 OBB fork: KFIoU + `sin(2θ)/cos(2θ)` head, rotated SimOTA, rotated NMS, YOLOv8-OBB pallet dataset, demo class names + FPS overlay. `main` and `obb-rotated-assign` are synced.
 * 【2023/02/28】 We support assignment visualization tool, see doc [here](./docs/assignment_visualization.md).
 * 【2022/04/14】 We support jit compile op.
 * 【2021/08/19】 We optimize the training process with **2x** faster training and **~1%** higher performance! See [notes](docs/updates_note.md) for more details.
@@ -68,10 +189,12 @@ This repo is an implementation of PyTorch version YOLOX, there is also a [MegEng
 
 Step1. Install YOLOX from source.
 ```shell
-git clone git@github.com:Megvii-BaseDetection/YOLOX.git
+git clone https://github.com/TANISHQBEDI/YOLOX.git
 cd YOLOX
 pip3 install -v -e .  # or  python3 setup.py develop
 ```
+
+Upstream YOLOX: `git clone git@github.com:Megvii-BaseDetection/YOLOX.git`
 
 </details>
 
@@ -92,6 +215,12 @@ python tools/demo.py image -f exps/default/yolox_s.py -c /path/to/your/yolox_s.p
 Demo for video:
 ```shell
 python tools/demo.py video -n yolox-s -c /path/to/your/yolox_s.pth --path /path/to/your/video --conf 0.25 --nms 0.45 --tsize 640 --save_result --device [cpu/gpu]
+```
+
+Pallet OBB (webcam overlay: FPS, infer ms, dets, tilt). `q` to quit:
+```shell
+python tools/demo.py webcam -f exps/example/custom/yolox_s_pallets.py \
+  -c pths/yolox_s_obb.pt --conf 0.25 --nms 0.45 --tsize 416 --device cpu
 ```
 
 
@@ -203,6 +332,8 @@ python -m yolox.tools.eval -n  yolox-s -c yolox_s.pth -b 1 -d 1 --conf 0.001 --f
 *  [Manipulating training image size](docs/manipulate_training_image_size.md)
 *  [Assignment visualization](docs/assignment_visualization.md)
 *  [Freezing model](docs/freeze_module.md)
+
+OBB pallet training, labels, `reg_weight` / `angle_weight`, and demo: see **Oriented boxes (this fork)** at the top of this README.
 
 </details>
 
