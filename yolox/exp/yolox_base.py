@@ -97,13 +97,6 @@ class Exp(BaseExp):
         # angle finetune from a strong detector, use reg_weight=1, angle_weight=5.
         self.reg_weight = 5.0
         self.angle_weight = 0.5
-        # Object-shape prior. Weights 0 = off (default).
-        self.aspect_min = 0.0
-        self.aspect_max = 100.0
-        self.aspect_weight = 0.0
-        self.min_side_px = 0.0
-        self.max_side_px = 1.0e9
-        self.size_weight = 0.0
         # save history checkpoint or not.
         # If set to False, yolox will only save latest and best ckpt.
         self.save_history_ckpt = True
@@ -138,12 +131,6 @@ class Exp(BaseExp):
         self.model.head.initialize_biases(1e-2)
         self.model.head.reg_weight = float(getattr(self, "reg_weight", 5.0))
         self.model.head.angle_weight = float(getattr(self, "angle_weight", 0.5))
-        self.model.head.aspect_min = float(getattr(self, "aspect_min", 0.0))
-        self.model.head.aspect_max = float(getattr(self, "aspect_max", 100.0))
-        self.model.head.aspect_weight = float(getattr(self, "aspect_weight", 0.0))
-        self.model.head.min_side_px = float(getattr(self, "min_side_px", 0.0))
-        self.model.head.max_side_px = float(getattr(self, "max_side_px", 1.0e9))
-        self.model.head.size_weight = float(getattr(self, "size_weight", 0.0))
         self.model.train()
         return self.model
 

@@ -17,7 +17,6 @@ from yolox.utils import (
     kfiou_loss,
     meshgrid,
     rbox_iou,
-    rbox_prior_loss,
     visualize_assign,
 )
 
@@ -149,13 +148,6 @@ class YOLOXHead(nn.Module):
         # Detection pretrain: 5.0 / 0.5. Angle finetune: 1.0 / 5.0
         self.reg_weight = 5.0
         self.angle_weight = 0.5
-        # Object-shape prior (off when weights are 0)
-        self.aspect_min = 0.0
-        self.aspect_max = 100.0
-        self.aspect_weight = 0.0
-        self.min_side_px = 0.0
-        self.max_side_px = 1.0e9
-        self.size_weight = 0.0
         self.strides = strides
         self.grids = [torch.zeros(1)] * len(in_channels)
 
@@ -456,21 +448,6 @@ class YOLOXHead(nn.Module):
 
         reg_weight = float(getattr(self, "reg_weight", 5.0))
         angle_weight = float(getattr(self, "angle_weight", 0.5))
-        aspect_weight = float(getattr(self, "aspect_weight", 0.0))
-        size_weight = float(getattr(self, "size_weight", 0.0))
-        loss_aspect = pred_rbox.new_zeros(())
-        loss_size = pred_rbox.new_zeros(())
-        if aspect_weight > 0.0 or size_weight > 0.0:
-            loss_aspect, loss_size = rbox_prior_loss(
-                pred_rbox,
-                aspect_min=getattr(self, "aspect_min", 0.0),
-                aspect_max=getattr(self, "aspect_max", 100.0),
-                min_side=getattr(self, "min_side_px", 0.0),
-                max_side=getattr(self, "max_side_px", 1.0e9),
-            )
-            loss_aspect = loss_aspect.sum() / num_fg
-            loss_size = loss_size.sum() / num_fg
-        loss_prior = aspect_weight * loss_aspect + size_weight * loss_size
         # KFIoU jointly scores (w,h,θ); angle_weight must be large enough that
         # sin/cos does not collapse to 0 when most GT pallets are upright.
         loss = (
@@ -479,7 +456,6 @@ class YOLOXHead(nn.Module):
             + loss_cls
             + loss_l1
             + angle_weight * loss_angle
-            + loss_prior
         )
 
         return (
@@ -489,7 +465,6 @@ class YOLOXHead(nn.Module):
             loss_cls,
             loss_l1,
             loss_angle,
-            loss_prior,
             num_fg / max(num_gts, 1),
         )
 
