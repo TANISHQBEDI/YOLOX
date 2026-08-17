@@ -302,7 +302,8 @@ def _inv2(mat, eps=1e-6):
 def _xywhr_to_sigma(xywhr):
     """(N, 5) cx,cy,w,h,theta -> center (N,2), covariance (N,2,2)."""
     xy = xywhr[..., :2]
-    wh = xywhr[..., 2:4].clamp(min=1e-3)
+    # fp16 overflows at (w/2)^2 once w is a few hundred px (mosaic / random resize).
+    wh = xywhr[..., 2:4].clamp(min=1e-3, max=1.0e4)
     r = xywhr[..., 4]
     cos_r, sin_r = torch.cos(r), torch.sin(r)
     r00 = (cos_r * wh[..., 0] * 0.5) ** 2 + (sin_r * wh[..., 1] * 0.5) ** 2
@@ -320,6 +321,9 @@ def kfiou_matrix(boxes_a, boxes_b, eps=1e-6):
     """
     if boxes_a.numel() == 0 or boxes_b.numel() == 0:
         return boxes_a.new_zeros((boxes_a.shape[0], boxes_b.shape[0]))
+    dtype = boxes_a.dtype
+    boxes_a = boxes_a.float()
+    boxes_b = boxes_b.float()
     _, sig_a = _xywhr_to_sigma(boxes_a)
     _, sig_b = _xywhr_to_sigma(boxes_b)
     sig_a = sig_a[:, None]
@@ -331,17 +335,22 @@ def kfiou_matrix(boxes_a, boxes_b, eps=1e-6):
     sig_kf = sig_a - torch.matmul(kalman, sig_a)
     vb = 4.0 * _det2(sig_kf).clamp(min=0.0).sqrt()
     vb = torch.nan_to_num(vb, nan=0.0)
-    return vb / (vb_a + vb_b - vb + eps)
+    iou = vb / (vb_a + vb_b - vb + eps)
+    return torch.nan_to_num(iou, nan=0.0).clamp(0.0, 1.0).to(dtype)
 
 
 def kfiou_loss(pred, target, beta=1.0 / 9.0, eps=1e-6):
     """
     Aligned KFIoU loss (N,5) vs (N,5): Smooth-L1 on centers + (1 - KFIoU).
 
-    Returns per-sample loss of shape (N,).
+    Returns per-sample loss of shape (N,). Always computed in fp32 so AMP
+    mosaic batches with large w/h do not overflow (w/2)^2 in float16.
     """
     if pred.numel() == 0:
         return pred.new_zeros((0,))
+    dtype = pred.dtype
+    pred = pred.float().clone()
+    target = target.float().clone()
     xy_p, xy_t = pred[:, :2], target[:, :2]
     diff = (xy_p - xy_t).abs()
     xy_loss = torch.where(diff < beta, 0.5 * diff * diff / beta, diff - 0.5 * beta).sum(-1)
@@ -352,8 +361,9 @@ def kfiou_loss(pred, target, beta=1.0 / 9.0, eps=1e-6):
     kalman = torch.matmul(sig_p, _inv2(sig_p + sig_t))
     sig_kf = sig_p - torch.matmul(kalman, sig_p)
     vb = torch.nan_to_num(4.0 * _det2(sig_kf).clamp(min=0.0).sqrt(), nan=0.0)
-    overlap = vb / (vb_p + vb_t - vb + eps)
-    return xy_loss + (1.0 - overlap)
+    overlap = (vb / (vb_p + vb_t - vb + eps)).clamp(0.0, 1.0)
+    loss = xy_loss + (1.0 - overlap)
+    return torch.nan_to_num(loss, nan=0.0, posinf=10.0, neginf=0.0).to(dtype)
 
 
 def rbox_to_aabb_xyxy(xywhr):

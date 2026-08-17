@@ -128,6 +128,10 @@ class Trainer:
             outputs = self.model(inps, targets)
 
         loss = outputs["total_loss"]
+        if not torch.isfinite(loss):
+            logger.warning("non-finite loss, skip iter")
+            self.optimizer.zero_grad()
+            return
 
         self.optimizer.zero_grad()
         self.scaler.scale(loss).backward()

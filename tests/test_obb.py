@@ -186,6 +186,12 @@ class TestCanonicalizeAndKFIoU(unittest.TestCase):
         b = torch.tensor([[80.0, 80.0, 10.0, 10.0, 0.0]])
         self.assertGreater(float(kfiou_loss(a, b)[0]), float(kfiou_loss(a, a)[0]))
 
+    def test_kfiou_finite_for_large_fp16_boxes(self):
+        a = torch.tensor([[200.0, 200.0, 800.0, 80.0, 0.3]], dtype=torch.float16)
+        b = torch.tensor([[210.0, 190.0, 790.0, 90.0, 0.2]], dtype=torch.float16)
+        loss = kfiou_loss(a, b)
+        self.assertTrue(torch.isfinite(loss).all())
+
 
 class TestWrapAndPad(unittest.TestCase):
     def test_wrap_angle_range(self):
