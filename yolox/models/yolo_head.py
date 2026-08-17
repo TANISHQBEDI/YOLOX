@@ -575,9 +575,11 @@ class YOLOXHead(nn.Module):
             cls_preds_, obj_preds_ = cls_preds_.cpu(), obj_preds_.cpu()
 
         with torch.cuda.amp.autocast(enabled=False):
+            # Out-of-range / NaN here trips CUDA BCE: `input_val >= 0 && <= 1`.
+            # fp16 overflow on the first finetune batch is the usual cause.
             cls_preds_ = (
-                cls_preds_.float().sigmoid_() * obj_preds_.float().sigmoid_()
-            ).sqrt()
+                cls_preds_.float().sigmoid() * obj_preds_.float().sigmoid()
+            ).sqrt().nan_to_num(0.0).clamp_(0.0, 1.0)
             pair_wise_cls_loss = F.binary_cross_entropy(
                 cls_preds_.unsqueeze(0).repeat(num_gt, 1, 1),
                 gt_cls_per_image.unsqueeze(1).repeat(1, num_in_boxes_anchor, 1),
