@@ -128,30 +128,32 @@ class Trainer:
             outputs = self.model(inps, targets)
 
         loss = outputs["total_loss"]
-        if not torch.isfinite(loss):
+        skip_optim = not torch.isfinite(loss)
+        if skip_optim:
             logger.warning("non-finite loss, skip iter")
             self.optimizer.zero_grad()
-            return
+        else:
+            self.optimizer.zero_grad()
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
-        self.optimizer.zero_grad()
-        self.scaler.scale(loss).backward()
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
-
-        if self.use_model_ema:
-            self.ema_model.update(self.model)
+            if self.use_model_ema:
+                self.ema_model.update(self.model)
 
         lr = self.lr_scheduler.update_lr(self.progress_in_iter + 1)
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
         iter_end_time = time.time()
-        self.meter.update(
+        meter_kwargs = dict(
             iter_time=iter_end_time - iter_start_time,
             data_time=data_end_time - iter_start_time,
             lr=lr,
-            **outputs,
         )
+        if not skip_optim:
+            meter_kwargs.update(outputs)
+        self.meter.update(**meter_kwargs)
 
     def before_train(self):
         logger.info("args: {}".format(self.args))
@@ -307,9 +309,11 @@ class Trainer:
 
         if (self.iter + 1) % self.exp.print_interval == 0:
             if self.rank == 0:
+                lr_latest = self.meter["lr"].latest
                 if self.args.logger == "tensorboard":
-                    self.tblogger.add_scalar(
-                        "train/lr", self.meter["lr"].latest, self.progress_in_iter)
+                    if lr_latest is not None:
+                        self.tblogger.add_scalar(
+                            "train/lr", lr_latest, self.progress_in_iter)
                     for k, v in loss_meter.items():
                         if v.latest is None:
                             continue
@@ -317,13 +321,13 @@ class Trainer:
                             f"train/{k}", v.latest, self.progress_in_iter)
                 if self.args.logger == "wandb":
                     metrics = {"train/" + k: v.latest for k, v in loss_meter.items() if v.latest is not None}
-                    metrics.update({
-                        "train/lr": self.meter["lr"].latest
-                    })
+                    if lr_latest is not None:
+                        metrics["train/lr"] = lr_latest
                     self.wandb_logger.log_metrics(metrics, step=self.progress_in_iter)
                 if self.args.logger == 'mlflow':
                     logs = {"train/" + k: v.latest for k, v in loss_meter.items() if v.latest is not None}
-                    logs.update({"train/lr": self.meter["lr"].latest})
+                    if lr_latest is not None:
+                        logs["train/lr"] = lr_latest
                     self.mlflow_logger.on_log(self.args, self.exp, self.epoch+1, logs)
 
             self.meter.clear_meters()
